@@ -287,8 +287,8 @@ Everything expensive is computed once and reused:
 **Why generate TCA at t=24h (window end)?**
 It's the most natural place — you're saying "I know TCA is in 24 hours, what are the initial conditions?" Having TCA at the boundary also stress-tests the TCA finder's ability to handle boundary minima, which requires the fine search to extend slightly past the window.
 
-**Why 50 m/s minimum for overtaking scenarios?**
-At very low relative speeds (~5 m/s), two nearly co-orbital satellites drift relative to each other and can have multiple near-approach points over 24 hours. The TCA finder correctly finds *a* minimum, but it may not be the one we planted at t=24h. 50 m/s produces a single unambiguous closest approach.
+**Why 50 m/s for the overtaking test fixture?**
+At very low relative speeds (~5 m/s), two nearly co-orbital satellites can have multiple near-approach points over a 24-hour window. `find_tca` correctly finds *a* minimum — that is the TCA for that scenario, and Pc methods can work with it just fine. The test fixture uses 50 m/s simply so the found TCA matches the one we planted at t=24h, making the test assertion straightforward. For future work: multi-minima scenarios are worth exploring explicitly — the "right" TCA to use for Pc may not always be the global minimum (e.g. if a later closer approach is more operationally relevant).
 
 **Why are TCA tests cached in conftest.py?**
 Each `find_tca` call involves 200 numerical orbit propagations. Without caching, 13 TCA tests × 1 call each = 13 expensive computations. With caching, it's 4 computations total (one per scenario), shared across all tests.
