@@ -62,10 +62,10 @@ HBR = 10.0  # m
 # ---------------------------------------------------------------------------
 
 SCENARIOS = [
-    dict(name="crossing",         r_mag=500.0,  v_mag=15.0,  conjunction_type="crossing",   seed=42),
+    dict(name="crossing",         r_mag=500.0,  v_mag=7000.0, conjunction_type="crossing",   seed=42),
     dict(name="head_on",          r_mag=200.0,  v_mag=500.0, conjunction_type="head-on",    seed=7),
-    dict(name="overtaking",       r_mag=1000.0, v_mag=50.0,  conjunction_type="overtaking", seed=99),
-    dict(name="near_miss",        r_mag=10.0,   v_mag=15.0,  conjunction_type="crossing",   seed=123),
+    dict(name="overtaking",       r_mag=1000.0, v_mag=15.0,  conjunction_type="overtaking", seed=99),
+    dict(name="near_miss",        r_mag=10.0,   v_mag=500.0, conjunction_type="crossing",   seed=123),
 ]
 
 
@@ -180,35 +180,66 @@ for cfg in SCENARIOS:
     ax.grid(True, alpha=0.3)
 
     # Panel 3: encounter plane projection
+    # Use two zoom levels when the miss distance >> HBR, so both the covariance
+    # ellipses (wide view) and the HBR disk at the miss point (zoomed inset)
+    # are visible.  When miss is comparable to the covariance spread (e.g.
+    # near-miss), a single view suffices.
     ax = axes[2]
-    # sigma ellipses
+    sig_max = np.sqrt(np.max(np.linalg.eigvalsh(C_2d)))
+    miss_norm = np.linalg.norm(miss_2d)
     colors_ell = ["#1f77b4", "#ff7f0e", "#d62728"]
     alphas_ell = [0.35, 0.20, 0.10]
-    for n_sig, color, alpha in zip([1, 2, 3], colors_ell, alphas_ell):
-        ell = cov_ellipse(miss_2d, C_2d, n_sig,
-                          fill=True, facecolor=color, alpha=alpha,
-                          edgecolor=color, linewidth=1.2)
-        ax.add_patch(ell)
-        ell2 = cov_ellipse(miss_2d, C_2d, n_sig,
-                           fill=False, edgecolor=color, linewidth=1.2,
-                           label=f"{n_sig}σ")
-        ax.add_patch(ell2)
-    # HBR disk
-    hbr_circle = plt.Circle((0, 0), HBR, color="red", fill=False,
-                              linewidth=1.5, linestyle="--", label=f"HBR {HBR:.0f} m")
-    ax.add_patch(hbr_circle)
-    # miss vector dot
-    ax.plot(*miss_2d, "kx", ms=8, mew=2, label="miss")
-    # axis limits: 4σ or at least 3× HBR
-    sig_max = np.sqrt(np.max(np.linalg.eigvalsh(C_2d)))
-    lim = max(4 * sig_max, 3 * HBR, np.linalg.norm(miss_2d) * 1.2)
-    ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
-    ax.set_aspect("equal")
+
+    def _draw_encounter(target_ax, xlim, ylim, draw_hbr=True, draw_miss_dot=True):
+        for n_sig, color, alpha in zip([1, 2, 3], colors_ell, alphas_ell):
+            ell = cov_ellipse(miss_2d, C_2d, n_sig,
+                              fill=True, facecolor=color, alpha=alpha,
+                              edgecolor=color, linewidth=1.2)
+            target_ax.add_patch(ell)
+            ell2 = cov_ellipse(miss_2d, C_2d, n_sig,
+                               fill=False, edgecolor=color, linewidth=1.2,
+                               label=f"{n_sig}σ")
+            target_ax.add_patch(ell2)
+        if draw_hbr:
+            hbr_circle = plt.Circle((0, 0), HBR, color="red", fill=True,
+                                     facecolor="red", alpha=0.25,
+                                     linewidth=1.5, linestyle="--",
+                                     label=f"HBR {HBR:.0f} m")
+            target_ax.add_patch(hbr_circle)
+            hbr_edge = plt.Circle((0, 0), HBR, color="red", fill=False,
+                                   linewidth=1.5, linestyle="--")
+            target_ax.add_patch(hbr_edge)
+        if draw_miss_dot:
+            target_ax.plot(*miss_2d, "kx", ms=8, mew=2, label="miss point")
+        target_ax.set_xlim(xlim); target_ax.set_ylim(ylim)
+        target_ax.set_aspect("equal")
+        target_ax.grid(True, alpha=0.3)
+
+    # Decide zoom level: if miss >> 2σ, use a wide view and add inset
+    use_inset = miss_norm > 3 * sig_max
+    wide_lim = max(2 * sig_max, miss_norm * 1.3, 3 * HBR)
+
+    _draw_encounter(ax, (-wide_lim, wide_lim), (-wide_lim, wide_lim),
+                    draw_hbr=not use_inset)
     ax.set_xlabel("x̂ (encounter plane, m)")
     ax.set_ylabel("ŷ (encounter plane, m)")
     ax.set_title(f"{title_base}\nEncounter Plane (HBR = {HBR:.0f} m)")
     ax.legend(fontsize=7, loc="upper right")
-    ax.grid(True, alpha=0.3)
+
+    if use_inset:
+        # Add an inset zoomed to the origin (HBR region) so the disk is visible
+        inset_lim = max(sig_max * 0.15, HBR * 5)
+        ax_ins = ax.inset_axes([0.02, 0.02, 0.38, 0.38])
+        _draw_encounter(ax_ins, (-inset_lim, inset_lim), (-inset_lim, inset_lim),
+                        draw_hbr=True, draw_miss_dot=False)
+        ax_ins.set_title("HBR region\n(zoomed)", fontsize=6)
+        ax_ins.tick_params(labelsize=5)
+        # draw arrow from inset to the origin on main axes
+        ax.annotate("HBR\n(zoomed)",
+                    xy=(0, 0), xycoords="data",
+                    xytext=(0.25, 0.25), textcoords="axes fraction",
+                    fontsize=6, color="red",
+                    arrowprops=dict(arrowstyle="->", color="red", lw=0.8))
 
     # Panel 4: RTN covariance cross-sections
     ax = axes[3]

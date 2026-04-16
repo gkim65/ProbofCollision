@@ -9,9 +9,20 @@ Visualise three key Pc phenomena discovered during development:
       high-Pc crossing with a tight covariance), Pc rises as the covariance
       grows.  Once the miss is within the spread of the Gaussian, Pc falls.
 
-  Figure 2 — Pc vs. miss distance, varying relative speed (head-on)
-      Shows that faster relative speed gives higher Pc at the same miss distance.
-      Faster v_rel keeps the projected covariance compact in the encounter plane.
+      The scale factor is applied to BOTH SC1 and SC2 covariances equally
+      (same tracking quality assumed for both objects).  The Fowler method
+      sums them — C_pos = C1 + C2 — so the combined projected covariance
+      scales by the same factor.  Scaling both is the standard assumption;
+      scaling only one would shift the curves but not change the qualitative
+      behaviour.
+
+  Figure 2 — Pc vs. miss distance: all four conjunction types
+      Shows how encounter geometry controls Pc across the full miss-distance
+      range.  Head-on has the highest Pc; crossing is 3-6 orders of magnitude
+      lower at the same miss distance because the large along-track uncertainty
+      projects into the encounter plane.  Overtaking is also suppressed for the
+      same reason.  Near-miss uses the same crossing geometry but is plotted
+      separately to show it overlaps exactly with the crossing curve.
 
   Figure 3 — Pc vs. miss distance: crossing vs. head-on at same v_rel
       Shows that encounter geometry matters independently of speed.  At 500 m/s,
@@ -104,7 +115,7 @@ def sweep_miss_distance(v_mag, ctype, seed, miss_values, hbr):
 # Figure
 # ---------------------------------------------------------------------------
 
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 BASE_POS = (100, 500, 50)   # default RTN position 1-sigma (m)
 BASE_VEL = (0.1, 0.5, 0.05) # default RTN velocity 1-sigma (m/s)
@@ -113,13 +124,19 @@ FLOOR = 1e-25                # clip floor for log-scale plotting
 
 
 # ── Plot 1: Pc vs. covariance scale factor ───────────────────────────────────
+# Shows all four scenario types, each at a fixed miss distance.
+# Overtaking uses r_mag=1000 m, v_mag=50 m/s — its encounter plane is R-N
+# (v_rel ≈ -T), so the projected covariance is compact like head-on, and Pc
+# is monotone-decreasing.  The 1000 m miss keeps its absolute Pc lower than
+# head-on at 200 m, so the curve sits below.
 ax = axes[0]
 scales = np.logspace(-2, 1.5, 60)   # 0.01× to ~30× default sigma
 
 cov_cases = [
-    ("head-on\n(201 m, 500 m/s)",           200, 500, "head-on",  7,   "steelblue"),
-    ("high-Pc crossing\n(204 m, 500 m/s)",  200, 500, "crossing", 42,  "darkorange"),
-    ("near-miss\n(10 m, 15 m/s)",            10,  15, "crossing", 123, "forestgreen"),
+    ("head-on\n(200 m miss)",          200, 500, "head-on",   7,   "steelblue"),
+    ("high-Pc crossing\n(200 m miss)", 200, 500, "crossing",  42,  "darkorange"),
+    ("overtaking\n(1000 m miss)",     1000,  50, "overtaking", 99, "forestgreen"),
+    ("near-miss\n(10 m miss)",          10,  15, "crossing",  123, "mediumpurple"),
 ]
 
 for label, r_mag, v_mag, ctype, seed, color in cov_cases:
@@ -142,51 +159,61 @@ ax.grid(True, which="both", alpha=0.3)
 ax.set_ylim(FLOOR, 1.0)
 
 
-# ── Plot 2: Pc vs. miss distance — effect of relative speed (head-on) ────────
-# One find_tca call per speed level (3 total), then reuse TCA states.
+# ── Plot 2: Pc vs. miss distance — three distinct geometry types ──────────────
+# Shows head-on, crossing, and overtaking — three geometrically distinct cases.
+# Near-miss is omitted because it uses the same crossing geometry and its curve
+# is identical to crossing (only the miss distance differs, not the geometry).
+#
+# Overtaking has a degenerate geometry for sweep_miss_distance: at TCA the
+# miss vector r_rel and v_rel are both approximately along-track (T), so
+# shifting s2 along r_hat keeps v_rel ∥ r_rel — the encounter plane is
+# undefined.  Instead we fix the TCA states from one scenario and shift s2
+# in the radial (R) direction, which is perpendicular to v_rel and represents
+# a realistic lateral miss offset for an overtaking encounter.
 ax = axes[1]
-miss_range = np.logspace(0.7, 3.2, 60)   # 5 m to ~1600 m
+miss_range = np.logspace(0.5, 4.3, 80)   # ~3 m to ~20,000 m
 
-speed_cases = [
-    (50,  "royalblue",  "50 m/s"),
-    (200, "darkorange", "200 m/s"),
-    (500, "forestgreen","500 m/s"),
-]
+# Head-on and crossing: sweep_miss_distance works fine (r_rel ⊥ v_rel at TCA)
+for ctype, seed, color, label in [
+    ("head-on",  7,  "steelblue",  "head-on (~15 km/s retrograde)"),
+    ("crossing", 42, "darkorange", "crossing (500 m/s, N-dominant v_rel)"),
+]:
+    v_ref = 500.0  # v_mag arg is ignored for head-on (retrograde ECI construction)
+    misses, pcs = sweep_miss_distance(v_ref, ctype, seed, miss_range, HBR)
+    axes[1].loglog(misses, pcs, color=color, lw=2, label=label)
 
-for v_mag, color, label in speed_cases:
-    misses, pcs = sweep_miss_distance(v_mag, "head-on", 7, miss_range, HBR)
-    ax.loglog(misses, pcs, color=color, lw=2, label=f"v_rel ≈ {label}")
+# Overtaking: shift s2 in the radial (R) direction, perpendicular to v_rel.
+# This keeps v_rel ⊥ r_rel (the TCA condition) and gives a well-defined
+# encounter plane (≈ R-N), matching the physical geometry of an overtaking pass.
+s1_ov, s2_ov, _ = get_tca_states(1000.0, 50.0, "overtaking", 99)
+v_rel_ov = s1_ov[3:] - s2_ov[3:]
+# Build radial unit vector: r_hat = s1_pos / |s1_pos|
+r_hat_eci = s1_ov[:3] / np.linalg.norm(s1_ov[:3])
+# Project out any component along v_rel to ensure true perpendicularity
+vhat = v_rel_ov / np.linalg.norm(v_rel_ov)
+perp = r_hat_eci - np.dot(r_hat_eci, vhat) * vhat
+perp = perp / np.linalg.norm(perp)
 
-ax.axvline(HBR, color="gray", ls=":", lw=1, label=f"HBR = {HBR:.0f} m")
-ax.set_xlabel("Miss distance (m)")
-ax.set_ylabel("Pc")
-ax.set_title("Pc vs. Miss Distance\n(head-on, default cov, HBR = 10 m)")
-ax.legend(fontsize=8)
-ax.grid(True, which="both", alpha=0.3)
-ax.set_ylim(1e-20, 1.0)
+ov_misses, ov_pcs = [], []
+for miss in miss_range:
+    s1 = s1_ov.copy(); s2 = s2_ov.copy()
+    s2[:3] = s1[:3] - perp * miss   # offset in radial direction
+    c1, c2 = generate_covariances(s1, s2)
+    ov_pcs.append(max(fowler_pc(s1, s2, c1, c2, HBR), 1e-20))
+    ov_misses.append(miss)
+axes[1].loglog(ov_misses, ov_pcs, color="forestgreen", lw=2,
+               label="overtaking (50 m/s, radial miss offset)")
+
+axes[1].axvline(HBR, color="gray", ls=":", lw=1, label=f"HBR = {HBR:.0f} m")
+axes[1].set_xlabel("Miss distance (m)")
+axes[1].set_ylabel("Pc")
+axes[1].set_title("Pc vs. Miss Distance — Geometry Comparison\n(default covariance, HBR = 10 m)")
+axes[1].legend(fontsize=7.5, loc="lower left")
+axes[1].grid(True, which="both", alpha=0.3)
+axes[1].set_ylim(1e-20, 1.0)
 
 
-# ── Plot 3: crossing vs. head-on at same v_rel (500 m/s) ─────────────────────
-# One find_tca call per geometry type (2 total), then reuse TCA states.
-ax = axes[2]
-miss_range2 = np.logspace(0.7, 3.2, 60)
-
-geom_cases = [
-    ("head-on",  "steelblue",  "head-on"),
-    ("crossing", "darkorange", "crossing"),
-]
-
-for ctype, color, label in geom_cases:
-    misses, pcs = sweep_miss_distance(500, ctype, 7, miss_range2, HBR)
-    ax.loglog(misses, pcs, color=color, lw=2, label=label)
-
-ax.axvline(HBR, color="gray", ls=":", lw=1, label=f"HBR = {HBR:.0f} m")
-ax.set_xlabel("Miss distance (m)")
-ax.set_ylabel("Pc")
-ax.set_title("Pc vs. Miss: Crossing vs. Head-on\n(v_rel ≈ 500 m/s, default cov, HBR = 10 m)")
-ax.legend(fontsize=8)
-ax.grid(True, which="both", alpha=0.3)
-ax.set_ylim(1e-20, 1.0)
+# (right panel removed — redundant with left panel)
 
 
 # ---------------------------------------------------------------------------

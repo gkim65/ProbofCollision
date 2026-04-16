@@ -1,0 +1,1041 @@
+\documentclass[11pt]{article}
+
+% ── packages ──────────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{listings}
+
+% ── listings style ────────────────────────────────────────────────────────────
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  language=Python,
+}
+
+% ── title ─────────────────────────────────────────────────────────────────────
+\title{\textbf{Probability of Collision in Low Earth Orbit}\\[0.4em]
+       \large Synthetic Scenario Generation, TCA Finding,\\
+       and the Fowler (1993) Analytic Method}
+\author{Grace Kim}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+\label{sec:intro}
+% ══════════════════════════════════════════════════════════════════════════════
+
+The probability of collision ($P_c$) between two orbiting objects is a central
+quantity in space situational awareness (SSA).  Given the growing number of
+active satellites and debris objects in low Earth orbit (LEO), fast and accurate
+$P_c$ calculations are critical for conjunction screening and collision avoidance
+maneuver decisions.
+
+This report documents the first phase of a systematic study of $P_c$ methods.
+The goals are threefold:
+\begin{enumerate}
+  \item Build a \textbf{synthetic conjunction generator} that produces
+        realistic LEO encounter scenarios with known ground truth, enabling
+        rigorous testing of any $P_c$ method.
+  \item Implement a \textbf{TCA finder} that locates the Time of Closest
+        Approach from initial conditions, as required by all analytic $P_c$
+        methods.
+  \item Implement the \textbf{Fowler (1993)} analytic $P_c$ method and
+        characterize its behavior across encounter geometries and covariance
+        regimes.
+\end{enumerate}
+
+All code is written in Python, using the \texttt{brahe} astrodynamics library
+for orbit propagation and coordinate frame transformations.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Background}
+\label{sec:background}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Reference Frames}
+
+Two frames are used throughout.
+
+\paragraph{Earth-Centered Inertial (ECI).}  Origin at Earth's center, axes
+fixed to the celestial sphere (J2000 epoch).  The full spacecraft state is the
+6-vector $\mathbf{x} = [\mathbf{r}^\top, \mathbf{v}^\top]^\top$ in meters and
+meters per second.
+
+\paragraph{Radial-Tangential-Normal (RTN).}  A body-fixed frame centered on a
+reference spacecraft (SC1).  The axes are:
+\begin{align}
+  \hat{\mathbf{r}} &= \frac{\mathbf{r}_1}{|\mathbf{r}_1|}
+    && \text{(radial — toward SC1 from Earth center)}, \\
+  \hat{\mathbf{n}} &= \frac{\mathbf{r}_1 \times \mathbf{v}_1}
+                           {|\mathbf{r}_1 \times \mathbf{v}_1|}
+    && \text{(normal — orbit angular momentum direction)}, \\
+  \hat{\mathbf{t}} &= \hat{\mathbf{n}} \times \hat{\mathbf{r}}
+    && \text{(tangential/along-track)}.
+\end{align}
+RTN is natural for expressing inter-spacecraft relative states and for
+parameterizing covariance matrices because tracking errors are largest along
+track.
+
+\subsection{Keplerian Orbital Elements}
+
+SC1's initial orbit is specified by six classical elements
+$(a, e, i, \Omega, \omega, M_0)$:
+semi-major axis, eccentricity, inclination, right ascension of the ascending
+node, argument of perigee, and mean anomaly at epoch.  All angles are in
+degrees; $a$ is in meters.  The \texttt{brahe} function
+\texttt{state\_koe\_to\_eci} converts these to an ECI state vector.
+
+\subsection{Conjunction Geometry}
+
+A \emph{conjunction} is a close approach event between two spacecraft.  The key
+scalar quantities at the Time of Closest Approach (TCA) are:
+\begin{itemize}
+  \item \textbf{Miss distance} $d = |\mathbf{r}_1 - \mathbf{r}_2|_{\text{TCA}}$
+        (meters).
+  \item \textbf{Relative speed} $v_\text{rel} = |\mathbf{v}_1 - \mathbf{v}_2|_{\text{TCA}}$
+        (m/s).
+  \item \textbf{Hard-body radius (HBR)} $r_\text{hb}$: the combined physical
+        cross-section radius of the two objects (meters).  A collision is said
+        to occur when $d \le r_\text{hb}$.
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Synthetic Conjunction Generation}
+\label{sec:conjunction}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Design Philosophy}
+
+Rather than choosing initial conditions and hoping a close approach occurs
+within a search window, the generator works \emph{backwards from TCA}:
+
+\begin{enumerate}
+  \item Define SC1's Keplerian orbit at TCA.
+  \item Place SC2 relative to SC1 at TCA using the desired miss distance
+        $d$ and relative speed $v_\text{rel}$, expressed in the RTN frame.
+        This guarantees the encounter geometry by construction.
+  \item Propagate both spacecraft \emph{backwards} 24 hours from TCA using
+        a numerical integrator to obtain $T{=}0$ initial conditions.
+\end{enumerate}
+
+Because the TCA geometry is designed explicitly, the ground truth
+(exact miss distance, exact TCA epoch, and TCA states) is always known.  This
+is essential for validating TCA-finding algorithms and $P_c$ methods.
+
+\subsection{SC1 Default Orbit}
+
+SC1 is placed in a representative LEO orbit at an altitude of 550\,km:
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  Element & Value \\
+  \midrule
+  Semi-major axis $a$ & $R_\oplus + 550{,}000$\,m \\
+  Eccentricity $e$ & 0.001 \\
+  Inclination $i$ & 55° \\
+  RAAN $\Omega$ & 20° \\
+  Arg.\ of perigee $\omega$ & 0° \\
+  Mean anomaly $M_0$ & 0° (at TCA) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{SC2 Placement in RTN}
+
+SC2's relative state at TCA is constructed so that:
+\begin{align}
+  |\mathbf{r}_\text{rel}|_{\text{TCA}} &= d  && \text{(desired miss distance)}, \\
+  |\mathbf{v}_\text{rel}|_{\text{TCA}} &= v_\text{rel} && \text{(desired relative speed)}, \\
+  \mathbf{r}_\text{rel} \cdot \mathbf{v}_\text{rel} &= 0
+  && \text{(TCA condition — relative motion perpendicular to miss vector)}.
+\end{align}
+
+The perpendicularity condition is enforced by projecting the velocity out of the
+miss-vector direction:
+\begin{equation}
+  \mathbf{v}_\perp = \mathbf{v}_\text{nom} -
+    \frac{\mathbf{v}_\text{nom} \cdot \mathbf{r}_\text{rel}}
+         {|\mathbf{r}_\text{rel}|^2}\,\mathbf{r}_\text{rel},
+  \qquad
+  \mathbf{v}_\text{rel} = v_\text{rel}\,\frac{\mathbf{v}_\perp}{|\mathbf{v}_\perp|}.
+\end{equation}
+
+\subsection{Conjunction Types}
+\label{sec:ctypes}
+
+Four encounter geometries are implemented.  \Cref{tab:ctypes} summarizes the
+RTN placement and physical interpretation of each.  Three of them
+(crossing, head-on, overtaking) represent distinct orbital mechanics regimes.
+The fourth — near-miss — uses the \emph{same} crossing geometry but with a
+10\,m miss distance (equal to the HBR), making it a stress test for $P_c$
+methods rather than a distinct encounter type.
+
+\begin{table}[h]
+\centering
+\caption{Conjunction types, RTN geometry at TCA, and physical interpretation.}
+\label{tab:ctypes}
+\begin{tabular}{lllp{5.8cm}}
+  \toprule
+  Type & Miss direction & $\mathbf{v}_\text{rel}$ dominant axis & Physical meaning \\
+  \midrule
+  Crossing  & $+\hat{\mathbf{t}}$ & $-\hat{\mathbf{n}}$ &
+    Two orbits in different planes; $v_\text{rel}$ is cross-track.
+    Most common real-world conjunction type.  Encounter plane is $\approx$R-T,
+    so the large along-track uncertainty projects in $\Rightarrow$ low $P_c$. \\[4pt]
+  Head-on   & $+\hat{\mathbf{t}}$ & retrograde ($\approx -\hat{\mathbf{t}}$) &
+    SC2 in a retrograde orbit; $v_\text{rel} \approx 2 \times v_\text{orb}
+    \approx 15$\,km/s.  Encounter plane is $\approx$R-N;
+    along-track uncertainty is \emph{excluded} $\Rightarrow$ compact
+    projected covariance, higher $P_c$. \\[4pt]
+  Overtaking & $+\hat{\mathbf{t}}$ & $-\hat{\mathbf{t}}$ &
+    SC2 slightly ahead in the same orbital plane; SC1 slowly catching up;
+    $v_\text{rel}$ is small ($\sim$50\,m/s).  Encounter plane is also $\approx$R-N,
+    but the large miss distance (1000\,m) keeps $P_c$ low. \\[4pt]
+  Near-miss  & $+\hat{\mathbf{t}}$ & $-\hat{\mathbf{n}}$ &
+    Identical geometry to crossing but miss distance $= 10$\,m $\approx$ HBR.
+    Same encounter plane, same wide projected covariance — but the Gaussian
+    mean sits \emph{at} the HBR boundary, giving $P_c \sim 10^{-3}$. \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Why near-miss is distinct from crossing despite identical geometry.}
+The crossing and near-miss scenarios use the same conjunction type code path and
+the same relative velocity direction.  The difference is entirely in the miss
+distance: 500\,m vs.\ 10\,m.  In the encounter-plane view, both have the same
+elongated covariance ellipse (wide along the T axis).  For the 500\,m crossing,
+the Gaussian center is far from the HBR disk — the tail barely reaches it, so
+$P_c \sim 10^{-14}$.  For the near-miss, the center sits right at the disk edge,
+so the integral captures a meaningful fraction of the Gaussian and $P_c \sim 10^{-3}$.
+This pair isolates the effect of miss distance from geometry (compare
+\Cref{fig:conj_crossing,fig:conj_nearmiss}).
+
+\paragraph{Special case: head-on.}  The RTN frame subtends only $\sim$63° between
+along-track and cross-track; a true 180° retrograde orbit cannot be expressed
+as a small RTN offset.  Instead, \texttt{\_sc2\_eci\_head\_on} constructs SC2
+directly in ECI by decomposing SC1's velocity into R, T, N components and
+negating the T component, producing an orbit with the same altitude but opposite
+direction:
+\begin{equation}
+  \mathbf{v}_2 = \mathbf{v}_{1,R} - \mathbf{v}_{1,T} + \mathbf{v}_{1,N}.
+\end{equation}
+
+\subsection{Per-Scenario Diagnostics}
+\label{sec:vis_4panel}
+
+\Cref{fig:conj_crossing,fig:conj_headon,fig:conj_overtaking,fig:conj_nearmiss}
+show the four-panel diagnostic plot for each scenario.  The panels are:
+\begin{enumerate}
+  \item \textbf{RTN trajectory} — $\Delta R$, $\Delta T$, $\Delta N$ vs.\ time.
+        The axis that crosses zero near $t=24$\,h identifies the approach
+        direction and the conjunction type.
+  \item \textbf{Miss distance vs.\ time} — scalar separation with a vertical
+        line at the TCA found by \texttt{find\_tca} and a horizontal line at
+        the HBR.  The width of the minimum shows how sharply the spacecraft
+        close in.
+  \item \textbf{Encounter-plane projection} — 1$\sigma$/2$\sigma$/3$\sigma$
+        covariance ellipses, the HBR disk (origin), and the miss point (cross).
+        The shape of the ellipse is the key quantity: compact for head-on
+        (high $P_c$), elongated for crossing/overtaking (low $P_c$).
+        When the miss distance is large relative to the ellipse spread (crossing,
+        overtaking), a zoomed inset shows the HBR disk at the origin.
+  \item \textbf{RTN covariance cross-sections} — position uncertainty
+        ellipses in the R-T, R-N, and T-N planes using the default 1-$\sigma$
+        values.  The T axis dominates, as expected for LEO tracking errors.
+\end{enumerate}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/conjunctions_crossing.png}
+  \caption{\textbf{Crossing conjunction} (500\,m miss, $v_\text{rel} = 7{,}000$\,m/s,
+    N-dominant approach).
+    \emph{RTN trajectory (panel 1):} the N component oscillates and crosses zero
+    at TCA (red dashed line), while T and R components show the long 24-hour
+    approach arc.
+    \emph{Miss distance (panel 2):} many oscillations over 24 hours with a
+    smooth final dip — characteristic of a crossing orbit whose ground tracks
+    approach each other gradually.
+    \emph{Encounter plane (panel 3):} the covariance ellipse is elongated
+    horizontally (along the T axis) because $\mathbf{v}_\text{rel} \approx \hat{\mathbf{n}}$
+    places the encounter plane $\approx$R-T, projecting the full 500\,m
+    along-track sigma into the 2D view.  The miss point (X) is far from the
+    10\,m HBR disk (zoomed inset, bottom-left).  Result: $P_c \sim 10^{-14}$.}
+  \label{fig:conj_crossing}
+\end{figure}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/conjunctions_head_on.png}
+  \caption{\textbf{Head-on conjunction} (200\,m miss, $v_\text{rel} \approx 15$\,km/s,
+    retrograde SC2).
+    \emph{RTN trajectory (panel 1):} T and R components oscillate over 24 hours
+    with high amplitude (retrograde orbit sweeps large RTN excursions); N is small.
+    \emph{Miss distance (panel 2):} rapid oscillations reflecting the high-speed
+    retrograde geometry, with a sharp minimum at TCA — the miss distance profile
+    collapses quickly because $v_\text{rel} \approx 15$\,km/s.
+    \emph{Encounter plane (panel 3):} the covariance ellipse is compact and
+    nearly circular.  With $\mathbf{v}_\text{rel} \approx -\hat{\mathbf{t}}$,
+    the encounter plane is $\approx$R-N, projecting only the small R (100\,m)
+    and N (50\,m) sigmas into the 2D view.  The full 500\,m along-track sigma
+    is perpendicular to the plane and excluded.  The HBR disk is visible at scale,
+    with the miss point close enough to contribute significant probability.
+    Result: $P_c \sim 5\times10^{-4}$.}
+  \label{fig:conj_headon}
+\end{figure}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/conjunctions_overtaking.png}
+  \caption{\textbf{Overtaking conjunction} (1000\,m miss, $v_\text{rel} = 50$\,m/s,
+    T-dominant approach).
+    \emph{RTN trajectory (panel 1):} both R and T components slowly decline toward
+    zero as SC1 catches SC2.  The oscillation pattern is slow, reflecting the
+    small relative speed.
+    \emph{Miss distance (panel 2):} many smooth oscillations over 24 hours as the
+    two spacecraft slowly converge, with a broad minimum — a slow, gentle approach.
+    \emph{Encounter plane (panel 3):} despite $\mathbf{v}_\text{rel} \approx -\hat{\mathbf{t}}$
+    pointing the encounter plane toward R-N (same as head-on), the miss distance
+    is 1000\,m.  The ellipse is elongated because the overtaking scenario has
+    the same default covariance, but with $v_\text{rel}$ somewhat off-axis from
+    pure along-track at this seed, some T-axis uncertainty projects in.
+    The zoomed inset shows the 10\,m HBR disk at the origin — far from the
+    1000\,m miss point — explaining the low $P_c$.}
+  \label{fig:conj_overtaking}
+\end{figure}
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/conjunctions_near_miss.png}
+  \caption{\textbf{Near-miss conjunction} (10\,m miss, $v_\text{rel} = 500$\,m/s,
+    crossing geometry — same as \Cref{fig:conj_crossing} except for miss distance).
+    \emph{RTN trajectory (panel 1):} identical qualitative shape to the crossing
+    scenario.  The N component approaches zero at TCA; only the final miss distance
+    differs.
+    \emph{Miss distance (panel 2):} smooth approach to 10\,m at TCA — the HBR
+    line (horizontal dashes) is nearly touching the minimum.
+    \emph{Encounter plane (panel 3):} the same elongated covariance ellipse as
+    the crossing case, but now the miss point (X) sits nearly at the edge of
+    the HBR disk.  Even though the ellipse is wide (the 500\,m along-track sigma
+    still projects in), the center is close enough to the disk that a non-trivial
+    fraction of the Gaussian mass falls inside.  Result: $P_c \sim 10^{-3}$,
+    demonstrating that miss distance alone can drive $P_c$ up by 11 orders of
+    magnitude relative to the geometrically identical crossing scenario.}
+  \label{fig:conj_nearmiss}
+\end{figure}
+
+\clearpage
+
+\subsection{3D RTN Relative Motion}
+\label{sec:vis_3d}
+
+\Cref{fig:3d_overview} shows the 3D relative trajectory of SC2 with SC1 fixed
+at the origin in the RTN frame.  Color varies from light red ($T{=}0$, 24\,h
+before TCA) to dark red (TCA).
+
+\paragraph{Why the crossing trajectory looks like a spiral.}
+The crossing scenario shows SC2 tracing a large, slowly-shrinking spiral in
+the RTN frame (\Cref{fig:3d_overview}, top-left).  This is not SC2 in a
+physical orbit around SC1 — it is an artifact of the RTN frame rotating with
+SC1's orbital motion.  SC1 completes roughly 14 orbits in 24 hours at 550\,km
+altitude.  Each orbit, the RTN frame rotates once with respect to inertial space.
+SC2 is in a fixed (non-rotating) orbit at a slightly different inclination, so
+its relative position in the RTN frame traces an ellipse once per orbit.
+Over 24 orbits the ellipses shift slightly as the crossing point slowly
+approaches, producing the spiral appearance.  The actual physical motion is two
+satellites in fixed orbits whose paths happen to cross once — the spiral is a
+frame effect, not a real trajectory.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\linewidth]{../plots/conjunctions_3d_orbits.png}
+  \caption{3D RTN relative trajectories for all four conjunction types.
+           SC1 is at the origin; SC2's path is colored light$\to$dark red
+           as time progresses toward TCA.
+           \textbf{Crossing (top-left):} SC2 appears to spiral inward over
+           24 hours — a frame artifact (see text); the actual close approach
+           is the tiny dark-red cluster near the origin.
+           \textbf{Head-on (top-right):} a tight ellipse reflecting the
+           retrograde orbit geometry; the approach and departure are rapid
+           ($\sim$15\,km/s) so the TCA cluster is compact.
+           \textbf{Overtaking (bottom-left):} SC2 slides slowly along $+T$
+           toward SC1, then begins to lap SC1 as the relative speed is low
+           ($\sim$50\,m/s); the 24-hour arc is a long, nearly-linear tube.
+           \textbf{Near-miss (bottom-right):} same spiral topology as crossing
+           but with a 10\,m miss distance; the TCA cluster collapses to a point
+           essentially at the origin.}
+  \label{fig:3d_overview}
+\end{figure}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Finding the Time of Closest Approach}
+\label{sec:tca}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Why TCA Must Be Found Numerically}
+
+All analytic $P_c$ methods — including Fowler (1993) — require the spacecraft
+states \emph{at TCA}: the relative position $\mathbf{r}_\text{rel}$ and relative
+velocity $\mathbf{v}_\text{rel}$ at the moment of closest approach.  These are
+needed to define the encounter plane and compute the miss vector $\mathbf{m}$.
+
+In practice, however, the inputs to a conjunction screening system are not states
+at TCA.  They are states at some catalog epoch — call it $T{=}0$ — which is
+typically 12--48 hours before the anticipated close approach.  You do not know in
+advance \emph{when} closest approach occurs; that is what you are trying to find.
+
+There is no closed-form expression for the TCA of two objects in general orbits.
+Even for two-body (Keplerian) motion, the relative trajectory is a complicated
+function of the six initial orbital elements of each object, and the time of
+minimum separation does not have an analytic solution.  It must be found
+numerically by propagating both trajectories and searching for the minimum
+of $d(t) = |\mathbf{r}_1(t) - \mathbf{r}_2(t)|$.
+
+This is non-trivial because:
+\begin{itemize}
+  \item Each evaluation of $d(t)$ requires integrating two sets of differential
+        equations from $T{=}0$ to time $t$ — this is expensive.
+  \item The function $d(t)$ can have multiple local minima over a 24-hour window
+        (e.g.\ for slow overtaking scenarios where the two satellites are nearly
+        co-orbital and approach each other repeatedly).
+  \item Standard gradient-based minimizers fail because the numerical integrator
+        produces slightly noisy function values.
+\end{itemize}
+
+A robust two-stage algorithm — coarse grid search followed by scalar minimization
+— handles all of these challenges.
+
+\subsection{Problem Statement}
+
+Given initial conditions $(\mathbf{x}_1(0), \mathbf{x}_2(0))$ at $T{=}0$,
+find the time $t^*$ in the planning horizon $[0,\; T_\text{horizon}]$ that
+minimizes the miss distance:
+\begin{equation}
+  t^* = \arg\min_{t \in [0,\;T_\text{horizon}]}
+    \bigl|\mathbf{r}_1(t) - \mathbf{r}_2(t)\bigr|,
+\end{equation}
+where $\mathbf{r}_i(t)$ is obtained by numerical integration of the equations
+of motion from $T{=}0$.
+
+\subsection{Algorithm}
+
+The search proceeds in two stages.
+
+\paragraph{Stage 1 — Coarse grid.}
+A single pair of propagators is advanced sequentially through $N_c = 200$
+evenly-spaced time nodes spanning the 24-hour window.  At each node $t_k$,
+the miss distance
+\begin{equation}
+  d_k = |\mathbf{r}_1(t_k) - \mathbf{r}_2(t_k)|
+\end{equation}
+is recorded.  Using a single pair of propagators (rather than creating fresh
+ones at each node) means only $N_c$ integration steps are performed in total —
+$O(N_c)$ work.  The best node $k^*$ is identified as $\arg\min_k d_k$.
+
+\paragraph{Stage 2 — Fine minimization.}
+Brent's method (\texttt{scipy.optimize.minimize\_scalar} with
+\texttt{method='bounded'}) refines the minimum within the interval
+$[t_{k^*} - \Delta t,\; t_{k^*} + \Delta t]$ where $\Delta t$ is one coarse
+grid step ($\approx 7.2$\,min).  The search is anchored at the state
+$({\mathbf{x}}_1(t_{k^*}), \mathbf{x}_2(t_{k^*}))$ so the integrator only
+propagates a short arc, not the full 24-hour window.  The tolerance is set to
+$\epsilon = 1$\,s.
+
+\paragraph{Typical performance.}
+A single \texttt{find\_tca} call takes 3--4\,s on a modern laptop: the coarse
+grid performs 200 propagation steps; the fine minimization performs
+$O(10)$ short-arc propagations.
+
+\subsection{TCA Timing and Miss Distance Accuracy}
+
+\Cref{tab:tca_accuracy} compares the TCA found by the algorithm against the
+ground truth planted by the conjunction generator.
+
+\begin{table}[h]
+\centering
+\caption{TCA finder accuracy across all scenario types.}
+\label{tab:tca_accuracy}
+\begin{tabular}{lrrrr}
+  \toprule
+  Scenario & Miss (m) & $v_\text{rel}$ (m/s) & Timing error (s) & Miss error (m) \\
+  \midrule
+  Crossing   & 500 & 7000 & $<5$ & $<5$ \\
+  Head-on    & 200 & 15000 & $<5$ & $<5$ \\
+  Overtaking & 1000 & 15 & $<5$ & $<5$ \\
+  Near-miss  & 10 & 500 & $<5$ & $<5$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Covariance Model}
+\label{sec:covariance}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Covariance Representation}
+
+Each spacecraft's state uncertainty is represented as a $6\times6$
+positive-definite covariance matrix $\mathbf{C}$ in ECI, with units
+$[\text{m}^2,\;\text{m}^2/\text{s}^2,\;\text{m}\cdot\text{m/s}]$ for the
+position-position, velocity-velocity, and cross blocks respectively.
+
+\subsection{RTN Parameterization}
+
+Tracking errors are naturally anisotropic in the RTN frame: along-track
+uncertainty dominates because orbit determination error grows fastest in the
+direction of motion.  The covariance is therefore specified as diagonal in RTN
+and then rotated to ECI:
+
+\begin{enumerate}
+  \item Construct a diagonal $6\times6$ RTN covariance from six 1-$\sigma$
+        values $(\sigma_R, \sigma_T, \sigma_N, \sigma_{\dot R}, \sigma_{\dot T},
+        \sigma_{\dot N})$:
+        \begin{equation}
+          \mathbf{C}_\text{RTN} = \mathrm{diag}
+            \bigl(\sigma_R^2,\; \sigma_T^2,\; \sigma_N^2,\;
+                  \sigma_{\dot R}^2,\; \sigma_{\dot T}^2,\; \sigma_{\dot N}^2\bigr).
+        \end{equation}
+  \item Fetch the $3\times3$ rotation matrix
+        $\mathbf{R} = \texttt{brahe.rotation\_rtn\_to\_eci}(\mathbf{x}_\text{ECI})$,
+        which maps RTN unit vectors to ECI columns.
+  \item Build a $6\times6$ block-diagonal rotation:
+        \begin{equation}
+          \mathbf{T} = \begin{pmatrix} \mathbf{R} & \mathbf{0} \\
+                                      \mathbf{0} & \mathbf{R} \end{pmatrix}.
+        \end{equation}
+  \item Rotate: $\mathbf{C}_\text{ECI} = \mathbf{T}\,\mathbf{C}_\text{RTN}\,\mathbf{T}^\top$.
+\end{enumerate}
+
+The trace of the position block is invariant under this rotation:
+$\mathrm{tr}(\mathbf{C}_\text{ECI}[:3,:3]) = \sigma_R^2 + \sigma_T^2 + \sigma_N^2$.
+
+\subsection{Default 1-$\sigma$ Values}
+
+The default uncertainty profile is representative of well-tracked LEO objects:
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  Component & Position (m) & Velocity (m/s) \\
+  \midrule
+  Radial (R) & 100 & 0.10 \\
+  Along-track (T) & 500 & 0.50 \\
+  Cross-track (N) & 50 & 0.05 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Simplification: Covariance Constructed at TCA}
+
+In a real conjunction pipeline, the covariance at $T{=}0$ would be propagated
+forward to TCA using a state transition matrix (STM):
+\begin{equation}
+  \mathbf{C}_\text{TCA} = \boldsymbol{\Phi}(t_\text{TCA}, 0)\;\mathbf{C}_0\;
+  \boldsymbol{\Phi}(t_\text{TCA}, 0)^\top,
+\end{equation}
+where $\boldsymbol{\Phi}$ is the $6\times6$ Jacobian of the propagated state
+with respect to the initial state.  Over 24 hours, along-track uncertainty can
+inflate by a factor of 10--100 due to differential drag and gravitational
+perturbations.
+
+For the purposes of this study (testing $P_c$ methods in isolation), covariances
+are constructed directly at TCA from fixed RTN 1-$\sigma$ assumptions.  This is
+correct for evaluating the Fowler algorithm independent of orbital mechanics
+errors, but a full end-to-end pipeline must propagate the covariance.  STM
+propagation is planned as a future addition (see \S\ref{sec:future}).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Probability of Collision: Fowler (1993) Method}
+\label{sec:fowler}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Overview}
+
+The Fowler (1993) method reduces the 3D collision problem to a 2D integral by
+projecting all relevant quantities onto the \emph{encounter plane} — the plane
+perpendicular to the relative velocity vector at TCA.  The key physical insight
+is that, during the brief encounter, the relative motion is dominated by the
+(nearly constant) relative velocity; motion within the encounter plane can be
+treated as instantaneous relative to the collision timescale.
+
+\subsection{Encounter Plane Construction}
+
+Given ECI states $\mathbf{x}_1, \mathbf{x}_2$ at TCA, define:
+\begin{align}
+  \mathbf{r}_\text{rel} &= \mathbf{r}_1 - \mathbf{r}_2, \\
+  \mathbf{v}_\text{rel} &= \mathbf{v}_1 - \mathbf{v}_2.
+\end{align}
+
+The encounter-plane orthonormal basis is:
+\begin{align}
+  \hat{\mathbf{z}} &= \frac{\mathbf{v}_\text{rel}}{|\mathbf{v}_\text{rel}|}
+    && \text{(normal to encounter plane, along relative velocity)}, \\
+  \hat{\mathbf{x}} &= \frac{\mathbf{r}_\text{rel} -
+      (\mathbf{r}_\text{rel} \cdot \hat{\mathbf{z}})\hat{\mathbf{z}}}
+    {\bigl|\mathbf{r}_\text{rel} - (\mathbf{r}_\text{rel} \cdot \hat{\mathbf{z}})\hat{\mathbf{z}}\bigr|}
+    && \text{(in-plane, toward miss vector)}, \\
+  \hat{\mathbf{y}} &= \hat{\mathbf{z}} \times \hat{\mathbf{x}}
+    && \text{(completes right-hand frame)}.
+\end{align}
+
+If $\mathbf{r}_\text{rel} \parallel \mathbf{v}_\text{rel}$ (zero impact parameter),
+$\hat{\mathbf{x}}$ is chosen as an arbitrary unit vector perpendicular to
+$\hat{\mathbf{z}}$.
+
+\subsection{2D Projection}
+
+Let $\mathbf{B} = [\hat{\mathbf{x}},\, \hat{\mathbf{y}}]^\top \in \mathbb{R}^{2\times3}$.
+The combined 3D position covariance is
+\begin{equation}
+  \mathbf{C}_\text{pos} = \mathbf{C}_1[{:}3,{:}3] + \mathbf{C}_2[{:}3,{:}3].
+\end{equation}
+Projecting onto the encounter plane:
+\begin{align}
+  \mathbf{C}_\text{2D} &= \mathbf{B}\,\mathbf{C}_\text{pos}\,\mathbf{B}^\top
+    \in \mathbb{R}^{2\times2}, \label{eq:c2d}\\
+  \mathbf{m} &= \mathbf{B}\,\mathbf{r}_\text{rel} \in \mathbb{R}^2.
+    \label{eq:miss2d}
+\end{align}
+
+\subsection{The $P_c$ Integral}
+
+The probability of collision is the integral of a 2D Gaussian centered at
+$\mathbf{m}$ with covariance $\mathbf{C}_\text{2D}$ over the hard-body disk
+of radius $r_\text{hb}$:
+
+\begin{equation}
+  \boxed{
+  P_c = \int\!\!\int_{x^2 + y^2 \le r_\text{hb}^2}
+    \mathcal{N}\!\left([x,\,y]^\top;\;\mathbf{m},\;\mathbf{C}_\text{2D}\right)
+    \, dx\, dy.}
+  \label{eq:fowler_pc}
+\end{equation}
+
+Here $\mathcal{N}(\mathbf{u};\;\boldsymbol{\mu},\;\boldsymbol{\Sigma})$ denotes
+the 2D Gaussian PDF evaluated at $\mathbf{u}$:
+\begin{equation}
+  \mathcal{N}(\mathbf{u};\;\boldsymbol{\mu},\;\boldsymbol{\Sigma})
+  = \frac{1}{2\pi\sqrt{|\boldsymbol{\Sigma}|}}
+    \exp\!\left(-\tfrac{1}{2}
+    (\mathbf{u}-\boldsymbol{\mu})^\top\boldsymbol{\Sigma}^{-1}
+    (\mathbf{u}-\boldsymbol{\mu})\right).
+\end{equation}
+
+The integral \eqref{eq:fowler_pc} is evaluated numerically using
+\texttt{scipy.integrate.dblquad}, parameterized as:
+\begin{equation}
+  P_c = \int_{-r_\text{hb}}^{r_\text{hb}}
+    \int_{-\sqrt{r_\text{hb}^2 - y^2}}^{+\sqrt{r_\text{hb}^2 - y^2}}
+    \mathcal{N}([x,y]^\top;\;\mathbf{m},\;\mathbf{C}_\text{2D})\;dx\;dy.
+  \label{eq:dblquad}
+\end{equation}
+
+Absolute and relative tolerances are set to $10^{-10}$ and $10^{-8}$,
+respectively.  The result is clamped to $[0, 1]$ to guard against tiny
+numerical overshoots.
+
+\subsection{Why the Encounter Geometry Dominates $P_c$}
+
+The encounter plane construction makes explicit why two encounters with the
+same miss distance and same covariance can have radically different $P_c$:
+\emph{it is the direction of $\mathbf{v}_\text{rel}$ that determines which
+axes of the covariance project into $\mathbf{C}_\text{2D}$.}
+
+\begin{itemize}
+  \item \textbf{Head-on} ($\mathbf{v}_\text{rel} \approx \hat{\mathbf{t}}$):
+    the encounter plane is roughly the R-N plane.  The large along-track
+    uncertainty ($\sigma_T = 500$\,m) is \emph{excluded} from $\mathbf{C}_\text{2D}$
+    because it lies along $\hat{\mathbf{z}}$.  The projected covariance is
+    compact, giving higher $P_c$.
+  \item \textbf{Crossing} ($\mathbf{v}_\text{rel} \approx \hat{\mathbf{n}}$):
+    the encounter plane is roughly the R-T plane.  The full 500\,m along-track
+    uncertainty \emph{projects into} $\mathbf{C}_\text{2D}$, creating a very
+    wide 2D Gaussian.  A 10\,m HBR disk covers a tiny fraction of this
+    distribution, giving much lower $P_c$.
+\end{itemize}
+
+This geometry effect accounts for 3--6 orders of magnitude difference in $P_c$
+between head-on and crossing encounters at the same miss distance (see
+\S\ref{sec:findings}).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Findings}
+\label{sec:findings}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/pc_findings.png}
+  \caption{$P_c$ sensitivity study using the Fowler (1993) method.
+    In both panels the covariance scale factor is applied equally to \emph{both}
+    spacecraft — since the Fowler method sums $\mathbf{C}_1 + \mathbf{C}_2$,
+    scaling both by the same factor is equivalent to scaling the combined
+    projected covariance by that factor.  This matches the standard assumption
+    that both objects have similar tracking quality.
+    \textbf{Left:} $P_c$ vs.\ covariance scale for all four scenario types at
+    their fixed miss distances.
+    Head-on (blue, 200\,m), overtaking (green, 1000\,m), and near-miss (purple,
+    10\,m) are all monotone-decreasing: their miss distances are already within
+    the spread of the projected Gaussian at default scale, so growing the
+    covariance only dilutes it.
+    High-$P_c$ crossing (orange, 200\,m) peaks near $3\times$ default before
+    falling — it starts in the rising regime where the Gaussian tail barely
+    reaches the HBR disk, then crosses into the falling regime (\S\ref{sec:finding1}).
+    \textbf{Right:} $P_c$ vs.\ miss distance at fixed default covariance.
+    Head-on (blue) stays near $10^{-2}$ out to several kilometers: its encounter
+    plane (R-N) excludes the large along-track sigma, keeping the projected
+    Gaussian compact.  Crossing (orange) falls much earlier because its encounter
+    plane (R-T) includes the full 500\,m along-track sigma, spreading the
+    Gaussian far beyond the 10\,m HBR.  Overtaking (green) uses a radial miss
+    offset perpendicular to $\mathbf{v}_\text{rel}$; the relevant projected sigma
+    is $\sigma_R = 100$\,m, so its curve drops at $\sim$1000\,m — between the
+    other two.  Near-miss is omitted: it shares identical crossing geometry and
+    its curve lies exactly on the crossing line (\S\ref{sec:finding2}).}
+  \label{fig:pc_findings}
+\end{figure}
+
+\subsection{Finding 1: $P_c$ vs.\ Covariance Size Is Non-Monotone}
+\label{sec:finding1}
+
+Growing the covariance does not always lower $P_c$.  Two competing effects
+determine the direction:
+
+\begin{center}
+\begin{tabular}{p{3.5cm}p{4cm}p{6cm}}
+  \toprule
+  Regime & Condition & Effect of growing $\sigma$ \\
+  \midrule
+  Rising & $d \gg \sigma_\text{2D}$ &
+    Gaussian tail barely reaches the HBR disk; growing spreads it toward the
+    disk $\Rightarrow$ $P_c$ rises. \\[4pt]
+  Falling & $d \ll \sigma_\text{2D}$ &
+    Gaussian nearly flat over the disk; growing dilutes it
+    $\Rightarrow$ $P_c$ falls. \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+In all covariance-scale experiments, both spacecraft receive the same scaled
+covariance — the scale factor is applied to $\mathbf{C}_1$ and $\mathbf{C}_2$
+identically.  Since the Fowler method sums them, this is equivalent to scaling
+the combined projected covariance $\mathbf{C}_\text{2D}$ by the same factor.
+
+The high-$P_c$ crossing scenario (204\,m miss, 500\,m/s) is observed to peak
+at $\approx$3$\times$ the default covariance.  At tight covariance
+($0.1\times$) the 204\,m miss is $>200\,\sigma$ away from the HBR — $P_c$ is
+essentially zero.  As the covariance grows, the tail reaches the HBR disk and
+$P_c$ rises.  Beyond the peak the Gaussian is so broad it becomes nearly
+uniform, and further growth dilutes it.
+
+\textbf{Practical implication:} a new, tighter observation can cause $P_c$ to
+\emph{increase} if the operator was previously in the rising regime.  This is
+physically correct — better tracking reveals a worse-than-expected situation.
+
+\subsection{Finding 2: Encounter Geometry Determines $P_c$ by Orders of Magnitude}
+\label{sec:finding2}
+
+At the same miss distance and the same covariance, head-on conjunctions give
+$P_c$ consistently 2--3 orders of magnitude higher than crossing conjunctions.
+The difference is purely geometric: what matters is the \emph{direction} of
+$\mathbf{v}_\text{rel}$, which controls which axes of the covariance project
+into $\mathbf{C}_\text{2D}$.
+
+\begin{itemize}
+  \item \textbf{Head-on} ($\mathbf{v}_\text{rel} \approx -\hat{\mathbf{t}}$):
+    encounter plane $\approx$R-N.  The large along-track sigma ($\sigma_T = 500$\,m)
+    lies along the normal to the plane ($\hat{\mathbf{z}}$) and is excluded
+    from the 2D projection entirely.  Only $\sigma_R = 100$\,m and
+    $\sigma_N = 50$\,m project in, giving a compact ellipse.
+  \item \textbf{Crossing} ($\mathbf{v}_\text{rel} \approx -\hat{\mathbf{n}}$):
+    encounter plane $\approx$R-T.  The full $\sigma_T = 500$\,m projects
+    directly into $\mathbf{C}_\text{2D}$, creating a wide ellipse.
+    A 10\,m HBR disk captures a much smaller fraction of this distribution.
+\end{itemize}
+
+The right panel of \Cref{fig:pc_findings} shows this directly: head-on and
+crossing both use a 200\,m miss, but head-on's compact projected covariance
+keeps $P_c \sim 10^{-3}$ at default scale while crossing's wide projection
+gives $P_c \sim 10^{-5}$ — two orders of magnitude lower at the same miss
+distance and same covariance magnitude.
+
+\subsection{Finding 3: Near-Miss and Crossing Share Identical Projected Covariances}
+
+The near-miss and crossing scenarios use the same conjunction type (N-dominant
+$\mathbf{v}_\text{rel}$, crossing code path) and the same default covariance.
+The projected $\mathbf{C}_\text{2D}$ and its eigenvectors are identical — the
+$P_c$-vs.-miss curves are indistinguishable and overlap perfectly.  Near-miss
+is therefore omitted from the center panel of \Cref{fig:pc_findings} to avoid
+redundancy.
+
+What differs is only the designed miss distance used in the test suite: 500\,m
+for crossing vs.\ 10\,m for near-miss.  The two scenarios give
+$P_c \sim 10^{-14}$ and $P_c \sim 10^{-3}$ respectively — an 11-order-of-magnitude
+difference driven entirely by how close the Gaussian center sits to the 10\,m
+HBR disk, not by any difference in geometry or covariance.  This is the clearest
+demonstration that miss distance and geometry are independent variables in the
+Fowler integral.
+
+\subsection{Scenario Comparison}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../plots/comparison_miss_distance.png}
+    \caption{Miss distance vs.\ time for all four scenarios.  The TCA is at
+             $t = 24$\,h by construction.  Each scenario has a distinct
+             approach profile: head-on has the sharpest minimum, overtaking
+             has a broad, flat minimum reflecting the low relative speed.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../plots/comparison_headon_vs_crossing.png}
+    \caption{Side-by-side encounter-plane projections for head-on (left) and
+             crossing (right) at similar miss distances.  The head-on
+             covariance ellipse is compact; the crossing ellipse is highly
+             elongated along the T axis, illustrating the geometry effect
+             on $P_c$.}
+  \end{subfigure}
+
+  \vspace{0.8em}
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../plots/comparison_crossing_vs_nearmiss.png}
+    \caption{Crossing vs.\ near-miss encounter-plane projections.  Both have
+             the same orbital geometry (N-dominant $\mathbf{v}_\text{rel}$) but
+             different miss distances (500\,m vs.\ 10\,m).  The near-miss
+             Gaussian center is close to the HBR disk, giving $P_c \sim 10^{-3}$.}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{../plots/comparison_overtaking_2d.png}
+    \caption{Overtaking scenario encounter plane.  $\mathbf{v}_\text{rel}$
+             is nearly along-track, so the encounter plane is nearly the R-N
+             plane — but the miss distance is 1000\,m and $v_\text{rel}$ is
+             only 15\,m/s, giving a large projected covariance and low $P_c$.}
+  \end{subfigure}
+  \caption{Scenario comparison figures from \texttt{plot\_scenario\_comparison.py}.}
+  \label{fig:comparison}
+\end{figure}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Test Suite}
+\label{sec:tests}
+% ══════════════════════════════════════════════════════════════════════════════
+
+A pytest suite of 70 tests validates all modules.  Session-scoped fixtures
+ensure expensive computations (scenario generation, TCA search) run once per
+\texttt{pytest} session, not once per test; the full suite completes in
+$\approx$35\,s.
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_conjunction.py} — 26 tests across 5 test classes.}
+\label{tab:test_conjunction}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Output structure}} \\
+  \texttt{test\_returns\_all\_keys} & Dict has exactly the 8 expected keys \\
+  \texttt{test\_state\_shapes} & All four ECI state arrays are shape $(6,)$ \\
+  \texttt{test\_scalars\_are\_float} & \texttt{miss\_distance} and \texttt{rel\_speed} are Python floats \\
+  \texttt{test\_epoch\_ordering} & \texttt{epoch\_start} is strictly before \texttt{epoch\_tca} \\
+  \midrule
+  \multicolumn{2}{l}{\textit{TCA geometry accuracy}} \\
+  \texttt{test\_crossing\_miss\_distance} & Miss distance within 1\,m of requested 500\,m \\
+  \texttt{test\_crossing\_rel\_speed} & Relative speed within 0.1\,m/s of requested \\
+  \texttt{test\_head\_on\_miss\_distance} & Miss distance within 1\,m of requested 200\,m \\
+  \texttt{test\_head\_on\_rel\_speed} & Relative speed within 1\,m/s of requested \\
+  \texttt{test\_overtaking\_miss\_distance} & Miss distance within 2\,m of requested 1000\,m \\
+  \texttt{test\_near\_miss\_distance} & Miss distance within 0.5\,m of requested 10\,m \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Physical sanity}} \\
+  \texttt{test\_sc1\_altitude\_at\_tca[*]} & SC1 altitude 200--2000\,km (3 scenarios, parametrized) \\
+  \texttt{test\_sc1\_speed\_at\_tca[*]} & SC1 orbital speed 6--9\,km/s (3 scenarios, parametrized) \\
+  \texttt{test\_two\_spacecraft\_are\_distinct\_at\_t0} & SC1 and SC2 at least 100\,m apart at $T{=}0$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Conjunction type geometry}} \\
+  \texttt{test\_crossing\_dominated\_by\_normal} & N component of $\mathbf{r}_\text{rel}$ is largest at TCA \\
+  \texttt{test\_head\_on\_dominated\_by\_along\_track} & T component (negative) is largest at TCA \\
+  \texttt{test\_overtaking\_dominated\_by\_along\_track} & T component (positive) is largest at TCA \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Reproducibility}} \\
+  \texttt{test\_same\_seed\_same\_result} & Same seed $\Rightarrow$ identical SC1 and SC2 TCA states \\
+  \texttt{test\_different\_seeds\_different\_sc2} & SC1 identical; SC2 differs across seeds \\
+  \midrule
+  \multicolumn{2}{l}{\textit{RTN trajectory sampling}} \\
+  \texttt{test\_output\_shape} & Returns array of shape $(n\_\text{samples}, 7)$ \\
+  \texttt{test\_time\_column\_starts\_at\_zero} & First time sample is $t=0$ \\
+  \texttt{test\_time\_column\_ends\_at\_tca\_hours} & Last time sample matches window length \\
+  \texttt{test\_final\_sample\_near\_tca\_miss\_distance} & Last RTN separation matches known miss (within 10\,m) \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_tca.py} — 13 tests across 4 test classes.}
+\label{tab:test_tca}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{TCA epoch}} \\
+  \texttt{test\_crossing\_tca\_timing} & Found TCA within 5\,s of planted TCA \\
+  \texttt{test\_head\_on\_tca\_timing} & Same for head-on (15\,km/s, sharp miss profile) \\
+  \texttt{test\_overtaking\_tca\_timing} & Same for overtaking (50\,m/s) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Miss distance at TCA}} \\
+  \texttt{test\_crossing\_miss\_distance} & Found miss within 5\,m of 500\,m \\
+  \texttt{test\_head\_on\_miss\_distance} & Found miss within 5\,m of 200\,m \\
+  \texttt{test\_overtaking\_miss\_distance} & Found miss within 5\,m of 1000\,m \\
+  \texttt{test\_near\_miss\_miss\_distance} & Found miss within 5\,m of 10\,m \\
+  \texttt{test\_miss\_distance\_is\_positive} & Miss distance $\ge 0$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{States at TCA}} \\
+  \texttt{test\_state\_shapes} & Both returned arrays are shape $(6,)$ \\
+  \texttt{test\_sc1\_in\_leo} & SC1 altitude 200--2000\,km at found TCA \\
+  \texttt{test\_sc1\_speed\_plausible} & SC1 orbital speed in LEO range \\
+  \texttt{test\_miss\_distance\_consistent\_with\_states} & State separation matches \texttt{find\_tca} miss (within 1\,m) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Edge cases}} \\
+  \texttt{test\_coarse\_steps\_parameter} & 50 coarse steps still finds TCA within 30\,s and 10\,m \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_fowler.py} — 31 tests across 5 test classes.}
+\label{tab:test_fowler}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Covariance generation}} \\
+  \texttt{test\_output\_shapes} & Both covariances are shape $(6, 6)$ \\
+  \texttt{test\_symmetric} & Both matrices symmetric to numerical precision \\
+  \texttt{test\_positive\_definite} & All eigenvalues positive \\
+  \texttt{test\_position\_variance\_order\_of\_magnitude} & ECI diagonal entries in expected range \\
+  \texttt{test\_custom\_std} & Trace of position block equals sum of input variances \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Basic $P_c$ properties}} \\
+  \texttt{test\_pc\_in\_unit\_interval} & $P_c \in [0, 1]$ \\
+  \texttt{test\_pc\_increases\_as\_miss\_decreases} & Closer miss $\Rightarrow$ higher $P_c$ \\
+  \texttt{test\_pc\_increases\_as\_hbr\_increases} & Larger HBR $\Rightarrow$ higher $P_c$ \\
+  \texttt{test\_pc\_increases\_as\_covariance\_grows} & Wider covariance $\Rightarrow$ higher $P_c$ (up to saturation) \\
+  \texttt{test\_pc\_returns\_float} & Return type is \texttt{float} \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Limit cases}} \\
+  \texttt{test\_zero\_miss\_small\_cov\_near\_one} & Zero miss, HBR $\gg \sigma$ $\Rightarrow$ $P_c > 0.99$ \\
+  \texttt{test\_large\_miss\_tiny\_cov\_near\_zero} & Miss $\gg$ HBR, $\sigma \ll$ miss $\Rightarrow$ $P_c < 10^{-10}$ \\
+  \texttt{test\_symmetric\_zero\_miss\_depends\_only\_on\_hbr\_and\_sigma} & Different HBR gives different $P_c$ at zero miss \\
+  \texttt{test\_large\_covariance\_geometric\_limit} & Larger $\sigma$ lowers $P_c$ in geometric limit \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Per-scenario magnitudes}} \\
+  \texttt{test\_crossing\_pc\_in\_range} & $P_c \in [0, 1]$ for crossing \\
+  \texttt{test\_head\_on\_pc\_in\_range} & $P_c \in [0, 1]$ for head-on \\
+  \texttt{test\_overtaking\_pc\_in\_range} & $P_c \in [0, 1]$ for overtaking \\
+  \texttt{test\_near\_miss\_pc\_higher\_than\_crossing} & 10\,m miss $>$ 500\,m miss \\
+  \texttt{test\_pc\_increases\_with\_hbr[*]} & HBR=50\,m gives higher $P_c$ than HBR=5\,m (3 scenarios) \\
+  \texttt{test\_slow\_crossing\_pc\_is\_very\_low} & Slow crossing $P_c < 10^{-10}$ \\
+  \texttt{test\_high\_pc\_crossing\_magnitude} & Fast crossing $P_c \in [10^{-7}, 10^{-2}]$ \\
+  \texttt{test\_head\_on\_pc\_magnitude} & Head-on $P_c \in [10^{-6}, 10^{-1}]$ \\
+  \texttt{test\_overtaking\_pc\_magnitude} & Overtaking $P_c \in [10^{-7}, 10^{-1}]$ \\
+  \texttt{test\_near\_miss\_pc\_magnitude} & Near-miss $P_c \in [10^{-5}, 10^{-1}]$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Covariance magnitude effects}} \\
+  \texttt{test\_head\_on\_pc\_monotone\_decreasing} & Head-on $P_c$ monotone: tight$\to$default$\to$loose$\to$very loose \\
+  \texttt{test\_high\_pc\_crossing\_non\_monotone} & Crossing $P_c$ non-monotone: near-zero at tight, peaks near loose \\
+  \texttt{test\_near\_miss\_pc\_monotone\_decreasing} & Near-miss $P_c$ monotone across all levels \\
+  \texttt{test\_all\_covariance\_levels\_valid} & $P_c \in [0, 1]$ at every covariance level \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Degenerate inputs}} \\
+  \texttt{test\_zero\_relative\_speed\_raises} & \texttt{ValueError} when $|\mathbf{v}_\text{rel}| = 0$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Future Work}
+\label{sec:future}
+% ══════════════════════════════════════════════════════════════════════════════
+
+The following extensions are planned, in approximate priority order.
+
+\paragraph{Library-grade interfaces.}
+The current modules contain test-harness scaffolding (hardcoded constants,
+2-spacecraft-at-a-time APIs, implicit unit conventions).  Before contributing
+to the \texttt{brahe} library, the modules will be refactored to expose clean,
+composable, fully-typed public APIs with NumPy-style docstrings.
+
+\paragraph{Chan (1997) series expansion.}
+The Chan series provides a closed-form alternative to the numerical double
+integral in \eqref{eq:dblquad}.  It converges in $\sim$10--20 terms and is
+$\approx$10$\times$ faster than \texttt{dblquad} for typical $P_c$ values.  It
+also handles $P_c < 10^{-10}$ correctly where double-precision quadrature
+underflows.  This will be implemented as a drop-in replacement and cross-validated
+against the Fowler numerical result.
+
+\paragraph{Monte Carlo baseline.}
+A naive Monte Carlo estimator will be added as a validation baseline for all
+analytic methods:
+\begin{equation}
+  \hat{P}_c^\text{MC} = \frac{1}{N}\sum_{i=1}^{N}
+    \mathbf{1}\!\left[|\mathbf{x}_i| \le r_\text{hb}\right],
+    \qquad \mathbf{x}_i \sim \mathcal{N}(\mathbf{r}_\text{rel},\;\mathbf{C}_\text{pos}).
+\end{equation}
+$N = 10^6$ samples suffice for $P_c \gtrsim 10^{-4}$.
+
+\paragraph{Importance sampling.}
+For $P_c < 10^{-6}$, naive Monte Carlo is impractical ($N \sim 10^8$ required).
+Importance sampling with a proposal centered near the HBR boundary will provide
+accurate estimates without requiring enormous sample counts.
+
+\paragraph{Patera (2001) line integral.}
+An alternative analytic formulation that avoids the 2D Gaussian projection in
+favor of a 1D line integral.  Implementing this alongside the Fowler/Chan methods
+will enable a structured comparison of the main analytic approaches.
+
+\paragraph{Covariance propagation via STM.}
+A state transition matrix (STM) module will propagate the initial covariance
+$\mathbf{C}_0$ forward to TCA via finite-difference Jacobian estimation,
+replacing the current shortcut of constructing covariances directly at TCA.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section*{References}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\begin{enumerate}
+  \item Fowler, W.T. (1993). ``A Probability of Collision Analysis for Conjunction
+        Assessments.'' AAS Paper 93-177.
+  \item Chan, F.K. (1997). ``Spacecraft Collision Probability.'' AAS Paper 97-173.
+  \item Patera, R.P. (2001). ``General Method for Calculating Satellite Collision
+        Probability.'' \textit{Journal of Guidance, Control, and Dynamics},
+        24(4), 716--722.
+  \item Alfano, S. (2005). ``A Numerical Implementation of Spherical Object
+        Collision Probability.'' \textit{Journal of the Astronautical Sciences},
+        53(1), 103--109.
+  \item Brahe astrodynamics library. \url{https://github.com/duncaneddy/brahe}
+\end{enumerate}
+
+\end{document}

@@ -18,6 +18,13 @@ tests/
     test_conjunction.py
     test_tca.py
     test_fowler.py
+
+plots/
+    plot_conjunctions.py      — 4-panel per-scenario: RTN trajectory, miss distance, encounter plane, RTN covariance
+    plot_3d_orbits.py         — 3D RTN relative motion (SC2 relative to SC1 at origin), 2×2 + individual PNGs
+    plot_3d_eci.py            — ECI 3D view: full orbit + zoomed TCA panel per scenario
+    plot_scenario_comparison.py — side-by-side comparison figures across scenarios
+    plot_pc_findings.py       — Pc sensitivity: vs covariance scale, vs miss distance, geometry comparison
 ```
 
 ---
@@ -42,13 +49,17 @@ Because you designed the TCA geometry explicitly, you always know the ground tru
 - **T (Tangential/Along-track)**: points in the direction SC1 is moving
 - **N (Normal/Cross-track)**: perpendicular to the orbital plane (R × T)
 
-The three conjunction types place SC2 at TCA along different RTN axes:
+The conjunction types and their physical geometry:
 
-| Type | Relative position at TCA | Physical meaning |
-|------|--------------------------|-----------------|
-| `"crossing"` | +N direction | SC2 comes from below/above the orbital plane |
-| `"head-on"` | −T direction | SC2 approaches from behind (opposing traffic) |
-| `"overtaking"` | +T direction | SC2 is ahead, being caught up to |
+| Type | Miss vector at TCA | Velocity direction | Physical meaning |
+|------|--------------------|--------------------|-----------------|
+| `"crossing"` | +T (along-track) | −N (cross-track) | Two orbits in different planes crossing — most common real-world type. v_rel dominated by N component, large inclination difference. |
+| `"head-on"` | +T (along-track) | retrograde | SC2 in retrograde orbit, built directly in ECI. v_rel ≈ 15 km/s (2× orbital speed), velocity angle ≈ 180°. |
+| `"overtaking"` | +T (along-track) | −T (along-track) | SC2 slightly ahead in same orbital plane, SC1 catching up. v_rel ~15 m/s. |
+| `"near_miss"` | +T (along-track) | −N (cross-track) | Same geometry as crossing but r_mag = 10 m — stress test for Pc methods. |
+| `"radial"` | +R (radial) | +T (along-track) | Different altitudes, same plane — decaying object passing through. |
+
+**Head-on is special:** it cannot be built in RTN (the RTN frame is only ~63° not 180°). Instead `_sc2_eci_head_on()` constructs SC2 directly in ECI by flipping the along-track (T) velocity component, producing a true retrograde orbit.
 
 ### Main function: `generate_conjunction()`
 
@@ -186,10 +197,10 @@ Everything expensive is computed once and reused:
 | Fixture | What it creates |
 |---------|----------------|
 | `eop` | Initializes Earth Orientation Parameters (required by brahe) |
-| `crossing_scenario` | 500 m miss, 15 m/s, out-of-plane geometry |
-| `head_on_scenario` | 200 m miss, 500 m/s, opposing along-track |
-| `overtaking_scenario` | 1000 m miss, 50 m/s, same-direction along-track |
-| `near_miss_scenario` | 10 m miss, 15 m/s — stress test for Pc methods |
+| `crossing_scenario` | 500 m miss, 7000 m/s v_rel, N-dominant crossing geometry |
+| `head_on_scenario` | 200 m miss, retrograde orbit, v_rel ≈ 15 km/s |
+| `overtaking_scenario` | 1000 m miss, 15 m/s v_rel, same-direction slow catch-up |
+| `near_miss_scenario` | 10 m miss, 500 m/s v_rel, crossing geometry |
 | `crossing_tca` | Cached `find_tca` + `get_states_at_tca` for crossing |
 | `head_on_tca` | Same for head-on |
 | `overtaking_tca` | Same for overtaking |
