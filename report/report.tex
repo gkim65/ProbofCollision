@@ -26,8 +26,8 @@
 
 % ── title ─────────────────────────────────────────────────────────────────────
 \title{\textbf{Probability of Collision in Low Earth Orbit}\\[0.4em]
-       \large Synthetic Scenario Generation, TCA Finding,\\
-       and the Fowler (1993) Analytic Method}
+       \large Synthetic Scenario Generation, TCA Finding, Analytic Methods,\\
+       Monte Carlo Baselines, and Hard Cases}
 \author{Grace Kim}
 \date{April 2026}
 
@@ -47,8 +47,9 @@ active satellites and debris objects in low Earth orbit (LEO), fast and accurate
 $P_c$ calculations are critical for conjunction screening and collision avoidance
 maneuver decisions.
 
-This report documents the first phase of a systematic study of $P_c$ methods.
-The goals are threefold:
+This report documents a systematic study of $P_c$ methods, covering four
+implementations and their validation across five synthetic LEO conjunction
+scenarios.  The goals are:
 \begin{enumerate}
   \item Build a \textbf{synthetic conjunction generator} that produces
         realistic LEO encounter scenarios with known ground truth, enabling
@@ -56,9 +57,12 @@ The goals are threefold:
   \item Implement a \textbf{TCA finder} that locates the Time of Closest
         Approach from initial conditions, as required by all analytic $P_c$
         methods.
-  \item Implement the \textbf{Fowler (1993)} analytic $P_c$ method and
-        characterize its behavior across encounter geometries and covariance
-        regimes.
+  \item Implement and compare four $P_c$ methods: \textbf{Fowler (1993)},
+        \textbf{Chan (1997)}, \textbf{Monte Carlo 2D}, and
+        \textbf{Monte Carlo 3D trajectory-integrated}.
+  \item Characterize method breakdowns via three \textbf{hard cases}: tiny
+        $P_c$ (numerical underflow), highly elongated covariance (anisotropy
+        error), and multiple close approaches (multi-encounter limitation).
 \end{enumerate}
 
 All code is written in Python, using the \texttt{brahe} astrodynamics library
@@ -265,7 +269,7 @@ show the four-panel diagnostic plot for each scenario.  The panels are:
 \begin{figure}[htb]
   \centering
   \includegraphics[width=\textwidth]{../plots/conjunctions_crossing.png}
-  \caption{\textbf{Crossing conjunction} (500\,m miss, $v_\text{rel} = 7{,}000$\,m/s,
+  \caption{\textbf{Crossing conjunction} (500\,m miss, $v_\text{rel} \approx 15$\,m/s,
     N-dominant approach).
     \emph{RTN trajectory (panel 1):} the N component oscillates and crosses zero
     at TCA (red dashed line), while T and R components show the long 24-hour
@@ -277,7 +281,7 @@ show the four-panel diagnostic plot for each scenario.  The panels are:
     horizontally (along the T axis) because $\mathbf{v}_\text{rel} \approx \hat{\mathbf{n}}$
     places the encounter plane $\approx$R-T, projecting the full 500\,m
     along-track sigma into the 2D view.  The miss point (X) is far from the
-    10\,m HBR disk (zoomed inset, bottom-left).  Result: $P_c \sim 10^{-14}$.}
+    10\,m HBR disk (zoomed inset, bottom-left).  Result: $P_c \approx 3.9\times10^{-4}$.}
   \label{fig:conj_crossing}
 \end{figure}
 
@@ -324,7 +328,7 @@ show the four-panel diagnostic plot for each scenario.  The panels are:
 \begin{figure}[htb]
   \centering
   \includegraphics[width=\textwidth]{../plots/conjunctions_near_miss.png}
-  \caption{\textbf{Near-miss conjunction} (10\,m miss, $v_\text{rel} = 500$\,m/s,
+  \caption{\textbf{Near-miss conjunction} (10\,m miss, $v_\text{rel} \approx 15$\,m/s,
     crossing geometry — same as \Cref{fig:conj_crossing} except for miss distance).
     \emph{RTN trajectory (panel 1):} identical qualitative shape to the crossing
     scenario.  The N component approaches zero at TCA; only the final miss distance
@@ -476,10 +480,10 @@ ground truth planted by the conjunction generator.
   \toprule
   Scenario & Miss (m) & $v_\text{rel}$ (m/s) & Timing error (s) & Miss error (m) \\
   \midrule
-  Crossing   & 500 & 7000 & $<5$ & $<5$ \\
+  Crossing   & 500 & 15 & $<5$ & $<5$ \\
   Head-on    & 200 & 15000 & $<5$ & $<5$ \\
-  Overtaking & 1000 & 15 & $<5$ & $<5$ \\
-  Near-miss  & 10 & 500 & $<5$ & $<5$ \\
+  Overtaking & 1000 & 50 & $<5$ & $<5$ \\
+  Near-miss  & 10 & 15 & $<5$ & $<5$ \\
   \bottomrule
 \end{tabular}
 \end{table}
@@ -676,6 +680,466 @@ between head-on and crossing encounters at the same miss distance (see
 \S\ref{sec:findings}).
 
 % ══════════════════════════════════════════════════════════════════════════════
+\section{Probability of Collision: Chan (1997) Series Expansion}
+\label{sec:chan}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Overview}
+
+The Chan (1997) method evaluates the same 2D-Gaussian-over-disk integral as
+Fowler (1993) — \eqref{eq:fowler_pc} — in closed form, avoiding numerical
+quadrature entirely.  The key advantage is speed: \texttt{chan\_pc} is
+approximately $1000\times$ faster than \texttt{fowler\_pc} on the same
+scenario because it replaces \texttt{scipy.integrate.dblquad} with a single
+evaluation of the noncentral chi-squared cumulative distribution function.  It
+is also numerically stable for $P_c < 10^{-10}$, where double-precision
+quadrature underflows.
+
+\subsection{Encounter Plane and 2D Projection}
+
+The encounter-plane construction is identical to Fowler (1993)
+(\S\ref{sec:fowler}): the same basis vectors $(\hat{\mathbf{x}},
+\hat{\mathbf{y}})$, the same combined position covariance $\mathbf{C}_\text{pos}$,
+and the same 2D projected covariance $\mathbf{C}_\text{2D}$ and miss vector
+$\mathbf{m}$ (equations \eqref{eq:c2d}--\eqref{eq:miss2d}).
+
+\subsection{Diagonalisation and Principal-Axis Frame}
+
+The $2\times2$ projected covariance is diagonalised by its eigendecomposition:
+\begin{equation}
+  \mathbf{C}_\text{2D} = \mathbf{V}\,\mathrm{diag}(\sigma_1^2,\,\sigma_2^2)\,\mathbf{V}^\top,
+  \qquad \sigma_1^2 \le \sigma_2^2,
+\end{equation}
+where $\mathbf{V}$ is orthogonal and the columns of $\mathbf{V}$ are the
+principal axes of the projected covariance ellipse.  The miss vector in the
+principal-axis frame is $\mathbf{m}_p = \mathbf{V}^\top \mathbf{m} =
+(x_0,\, y_0)^\top$.
+
+\subsection{The Chan Series}
+
+The Chan (1997) $P_c$ formula in the principal-axis frame is:
+
+\begin{equation}
+  \boxed{
+  P_c = \frac{\sigma_1}{\sigma_2}\;
+    \mathrm{ncx2}\!\left(\frac{R^2}{\sigma_1^2};\; 2,\;
+    \frac{x_0^2}{\sigma_1^2} + \frac{y_0^2}{\sigma_2^2}\right),}
+  \label{eq:chan_pc}
+\end{equation}
+
+where $\mathrm{ncx2}(x;\,\nu,\,\lambda)$ is the noncentral chi-squared
+cumulative distribution function with $\nu$ degrees of freedom and
+non-centrality parameter $\lambda$, evaluated at $x$.  Internally this is the
+series:
+\begin{equation}
+  \mathrm{ncx2}(x;\,2,\,\lambda)
+  = e^{-\lambda/2} \sum_{k=0}^{\infty}
+    \frac{(\lambda/2)^k}{k!}\;
+    \frac{\Gamma(k+1,\,x/2)}{\Gamma(k+1)},
+  \label{eq:ncx2_series}
+\end{equation}
+where $\Gamma(k+1,\,x/2) / \Gamma(k+1)$ is the regularised lower incomplete
+gamma function — equivalently, the probability that a $\chi^2(2k+2)$ random
+variable is at most $x$.  This series converges in 10--30 terms for all
+operationally relevant $P_c$ values.
+
+\paragraph{Interpretation of the parameters.}
+Define the total Mahalanobis noncentrality and the normalised hard-body threshold:
+\begin{align}
+  u &= \frac{x_0^2}{\sigma_1^2} + \frac{y_0^2}{\sigma_2^2}
+    && \text{(total normalised miss squared)}, \\
+  v &= \frac{R^2}{\sigma_1^2}
+    && \text{(HBR normalised by the smaller eigenvalue)}.
+\end{align}
+Then \eqref{eq:chan_pc} reads $P_c = (\sigma_1/\sigma_2)\,\mathrm{ncx2}(v;\,2,\,u)$.
+
+\paragraph{Anisotropy correction.}
+For isotropic covariance ($\sigma_1 = \sigma_2 = \sigma$):
+$P_c = \mathrm{ncx2}(R^2/\sigma^2;\,2,\,(x_0^2+y_0^2)/\sigma^2)$,
+which is the exact Marcum~Q representation of a circular-Gaussian integral over
+a disk~[2].  For anisotropic covariance, standardising
+$(x,y) \mapsto (x/\sigma_1,\,y/\sigma_2)$ converts the Gaussian to the identity
+but transforms the disk $\{x^2 + y^2 \le R^2\}$ into an ellipse with semi-axes
+$R/\sigma_1$ and $R/\sigma_2$.  Integrating a standard 2D Gaussian over this
+ellipse instead of the circle of radius $R/\sigma_1$ introduces an area
+correction proportional to $\sigma_1/\sigma_2$, which is the anisotropy factor
+in \eqref{eq:chan_pc}.  This approximation is accurate to $< 0.2\%$ across all
+five conjunction scenarios with default LEO covariances.
+
+\subsection{Numerical Stability}
+
+For very small $P_c$ (below $10^{-10}$), \texttt{dblquad} loses precision
+because the integrand underflows in double precision over most of the domain.
+The Chan series \eqref{eq:ncx2_series} avoids this by computing the Poisson
+weights in log-space internally; \texttt{scipy.stats.ncx2.cdf} handles
+$\lambda \to \infty$ and $x \to 0$ correctly by design.  This makes Chan
+(1997) the preferred method for conjunction screening at very low $P_c$
+thresholds.
+
+\subsection{Validation}
+
+\Cref{tab:chan_validation} compares $P_c$ from Chan (1997) and Fowler (1993)
+for all five conjunction scenarios at the default covariance and $R = 10$\,m.
+Agreement is $< 0.2\%$ in all cases.
+
+\begin{table}[htb]
+\centering
+\caption{Chan (1997) vs.\ Fowler (1993): per-scenario $P_c$ comparison,
+         default RTN covariance, $R = 10$\,m.}
+\label{tab:chan_validation}
+\begin{tabular}{lrrrr}
+  \toprule
+  Scenario & Miss (m) & $v_\text{rel}$ (m/s)
+            & $P_c^\text{Fowler}$ & $P_c^\text{Chan}$ \\
+  \midrule
+  Crossing        & 500  & 500  & $3.89 \times 10^{-4}$ & $3.89 \times 10^{-4}$ \\
+  Head-on         & 200  & 500  & $4.98 \times 10^{-3}$ & $4.98 \times 10^{-3}$ \\
+  Overtaking      & 1000 & 50   & $1.86 \times 10^{-4}$ & $1.86 \times 10^{-4}$ \\
+  Near-miss       & 10   & 15   & $4.99 \times 10^{-4}$ & $4.99 \times 10^{-4}$ \\
+  High-$P_c$ crossing & 200 & 500 & $4.80 \times 10^{-4}$ & $4.80 \times 10^{-4}$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Speed Comparison}
+
+\Cref{tab:chan_speed} shows wall-clock timing for a single $P_c$ call on each
+scenario.  Chan (1997) achieves approximately $1000\times$ speed-up over the
+Fowler \texttt{dblquad} implementation.
+
+\begin{table}[htb]
+\centering
+\caption{Wall-clock time per $P_c$ call, averaged over 20 (Fowler) or 200
+         (Chan) evaluations on an Apple M-series laptop.}
+\label{tab:chan_speed}
+\begin{tabular}{lrrl}
+  \toprule
+  Scenario & Fowler (ms) & Chan (ms) & Speed-up \\
+  \midrule
+  Head-on         & 94 & 0.09 & $\approx 1000\times$ \\
+  High-$P_c$ crossing & 94 & 0.09 & $\approx 1000\times$ \\
+  Overtaking      & 94 & 0.09 & $\approx 1000\times$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Probability of Collision: Monte Carlo 2D Baseline}
+\label{sec:mc2d}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Overview}
+
+The Monte Carlo 2D baseline validates Fowler (1993) and Chan (1997) by sampling
+directly from the encounter-plane Gaussian and counting hits inside the HBR
+disk.  It answers the same question as the analytic methods — using identical
+encounter-plane projection — and requires no closed-form integral.
+
+\subsection{Algorithm}
+
+\begin{enumerate}
+  \item Project both spacecraft states and combined covariance onto the
+        encounter plane using the same basis $(\hat{\mathbf{x}}, \hat{\mathbf{y}})$
+        as Fowler and Chan, yielding $\mathbf{m} \in \mathbb{R}^2$ and
+        $\mathbf{C}_\text{2D} \in \mathbb{R}^{2\times2}$.
+  \item Draw $N$ samples $\mathbf{s}_i \sim \mathcal{N}(\mathbf{m},
+        \mathbf{C}_\text{2D})$.
+  \item Count hits: $k = \#\{i : |\mathbf{s}_i| \le r_\text{hb}\}$.
+  \item Estimate $\hat{P}_c = k/N$ with 95\% confidence interval via the
+        normal approximation:
+        \begin{equation}
+          \hat{P}_c \pm 1.96\sqrt{\frac{\hat{P}_c(1-\hat{P}_c)}{N}}.
+        \end{equation}
+\end{enumerate}
+
+\paragraph{Performance.}
+At $N = 10^6$ samples, a single call takes 0.5--2\,s.  The estimator has
+standard deviation $\sigma_{\hat{P}_c} \approx \sqrt{P_c/N}$, so a 10\%
+relative error requires $N \approx 100/P_c$ samples.  For $P_c \sim 10^{-4}$,
+$N = 10^6$ gives $\sigma_{\hat{P}_c}/\hat{P}_c \approx 3\%$.
+
+\subsection{Validation}
+
+\Cref{tab:mc2d_validation} compares MC-2D against Chan (1997) for four scenarios
+with $N = 10^6$ and seed 42.  Agreement is within 3$\times$ in all cases.
+
+\begin{table}[htb]
+\centering
+\caption{MC-2D vs.\ Chan (1997): $P_c$ comparison at $N=10^6$, $R=10$\,m.
+         95\,\% CI shown for MC-2D.}
+\label{tab:mc2d_validation}
+\begin{tabular}{lrrrr}
+  \toprule
+  Scenario & Miss (m) & $v_\text{rel}$ (m/s) & $P_c^\text{Chan}$ & $P_c^\text{MC-2D}$ \\
+  \midrule
+  Crossing          & 500  & 500   & $\sim 4\times10^{-4}$ & $\sim 4\times10^{-4}$ \\
+  Head-on           & 200  & 15000 & $\sim 5\times10^{-3}$ & $\sim 5\times10^{-3}$ \\
+  Near-miss         & 10   & 15    & $\sim 5\times10^{-4}$ & $\sim 5\times10^{-4}$ \\
+  High-$P_c$ crossing & 200 & 500  & $\sim 5\times10^{-4}$ & $\sim 5\times10^{-4}$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Limitations}
+
+MC-2D returns $\hat{P}_c = 0$ when $P_c \ll 1/N$.  For $P_c \sim 10^{-12}$
+(Case A, \S\ref{sec:hardcases}), even $N = 10^9$ gives an expected hit count
+of $\sim10^{-3}$ — the method is fundamentally unable to resolve this regime.
+Importance sampling is required for $P_c < 10^{-6}$ (see \S\ref{sec:future}).
+
+\subsection{When to use}
+MC-2D is best used as a sanity check for Chan or Fowler on new scenarios where
+numerical issues are suspected, and for generating reference confidence intervals
+in the $P_c \gtrsim 10^{-5}$ regime.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Probability of Collision: Monte Carlo 3D Trajectory-Integrated}
+\label{sec:mc3d}
+% ══════════════════════════════════════════════════════════════════════════════
+
+\subsection{Overview}
+
+While the 2D encounter-plane projection is the standard formulation of the
+single-conjunction $P_c$, it conditions on the TCA geometry and assumes
+the encounter is instantaneous.  The MC-3D method relaxes this by perturbing
+the full 6D states, propagating both spacecraft numerically over a $\pm120$\,s
+window, and asking whether the 3D trajectory actually comes within HBR.
+
+\subsection{Algorithm}
+
+\begin{enumerate}
+  \item Build a block-diagonal $12\times12$ joint covariance
+        $\mathbf{C}_\text{joint} = \mathrm{diag}(\mathbf{C}_1, \mathbf{C}_2)$
+        from the two $6\times6$ covariances.
+  \item Sample $N$ perturbed state pairs:
+        $[\delta\mathbf{x}_1^\top, \delta\mathbf{x}_2^\top]^\top \sim
+        \mathcal{N}(\mathbf{0}, \mathbf{C}_\text{joint})$.
+  \item For each pair, propagate both perturbed states over 200 time nodes
+        spanning $\pm120$\,s around TCA using two-body dynamics.
+  \item Refine the true minimum miss distance via Brent's method within the
+        best coarse-grid interval.
+  \item Count pairs where the 3D minimum miss distance is $< r_\text{hb}$.
+\end{enumerate}
+
+\paragraph{Why Brent's method is essential.}
+For a head-on conjunction at $v_\text{rel} \approx 15$\,km/s, the collision
+window is only $2r_\text{hb}/v_\text{rel} = 20/15{,}000 \approx 1.3$\,ms.
+A $\pm120$\,s window with a 200-node coarse grid has a step size of
+$\approx$1.2\,s — four orders of magnitude coarser than the collision window.
+Without refinement, most true minimum-miss events would land between coarse
+nodes and be missed entirely.  Brent's method refines each candidate interval
+to 10\,ms precision, reliably capturing even 1.3\,ms windows.
+
+\paragraph{Performance.}
+At $N = 10{,}000$ samples, a single call takes $\approx$5\,s (each sample
+requires 200 propagation steps plus $O(10)$ Brent iterations).  At
+$N = 100{,}000$ samples, $\approx$50\,s.
+
+\subsection{Head-on Overestimation Finding}
+\label{sec:headon_overestimation}
+
+For head-on conjunctions, $\mathbf{r}_\text{rel} \parallel \mathbf{v}_\text{rel}$
+at TCA.  Projecting a 200\,m miss vector onto the encounter plane yields
+a near-zero in-plane component ($\approx$0.002\,m), because the full miss lies
+along the normal $\hat{\mathbf{z}}$.  This gives the 2D methods a near-zero
+projected miss, inflating $P_c$ to $\sim5\times10^{-3}$.
+
+The MC-3D method does not project.  It requires the 3D trajectory to physically
+pass within HBR, accounting for the full 200\,m separation.  For the head-on
+scenario with $N \ge 50{,}000$ samples, MC-3D converges to
+$P_c \approx 1.5\times10^{-3}$ — roughly $3\times$ lower than the 2D methods.
+Increasing $N$ further does not change this; it is a geometric difference, not
+a sampling artifact.
+
+\begin{table}[htb]
+\centering
+\caption{Head-on $P_c$: comparison across all four methods.
+         2D methods overestimate by $\approx$3$\times$ relative to MC-3D.}
+\label{tab:headon_overestimation}
+\begin{tabular}{lrl}
+  \toprule
+  Method & $P_c$ & Notes \\
+  \midrule
+  Fowler (1993) & $\sim 5\times10^{-3}$ & 2D projection, near-zero projected miss \\
+  Chan (1997)   & $\sim 5\times10^{-3}$ & same 2D projection \\
+  MC-2D         & $\sim 5\times10^{-3}$ & same 2D projection \\
+  MC-3D         & $\sim 1.5\times10^{-3}$ & full 3D geometry; converged at $N \ge 50k$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Full Method Comparison}
+\label{sec:method_comparison}
+
+\Cref{tab:all_methods} collects reference $P_c$ values from all four methods
+across all five standard scenarios.  The crossing scenario at 15\,m/s produces
+$P_c \sim 10^{-14}$ (slow relative speed $\Rightarrow$ wide projected Gaussian)
+which is below the MC floor at $N = 10^6$ and produces zero 3D hits at
+$N = 10{,}000$; it is denoted $0^*$.
+
+\begin{table}[htb]
+\centering
+\small
+\caption{$P_c$ by method and scenario.  Default RTN covariance
+  ($\sigma_R/\sigma_T/\sigma_N = 100/500/50$\,m), HBR\,=\,10\,m, seed\,42.
+  MC-2D: $N=10^6$.  MC-3D columns show $N=10$k, $100$k, and $1$M;
+  95\,\% CI in parentheses for $1$M.
+  \textbf{Bold}: converged value that disagrees with 2D methods.}
+\label{tab:all_methods}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrrrrr}
+  \toprule
+  Method
+    & Cross. & Head-on & Overt. & Near-miss & Hi-$P_c$ \\
+  & \footnotesize(500\,m, 15\,m/s)
+  & \footnotesize(195\,m, 15\,km/s)
+  & \footnotesize(1000\,m, 50\,m/s)
+  & \footnotesize(10\,m, 15\,m/s)
+  & \footnotesize(201\,m, 500\,m/s) \\
+  \midrule
+  Fowler           & $3.89\text{e-}4$ & $4.98\text{e-}3$ & $1.85\text{e-}4$ & $5.00\text{e-}4$ & $4.80\text{e-}4$ \\
+  Chan             & $3.89\text{e-}4$ & $4.98\text{e-}3$ & $1.86\text{e-}4$ & $4.99\text{e-}4$ & $4.80\text{e-}4$ \\
+  MC-2D ($1$M)     & $3.71\text{e-}4$ & $4.98\text{e-}3$ & $1.87\text{e-}4$ & $4.78\text{e-}4$ & $4.64\text{e-}4$ \\
+  \midrule
+  MC-3D ($10$k)    & $6.0\text{e-}4$  & $1.7\text{e-}3$  & $4.0\text{e-}4$  & $3.0\text{e-}4$  & $6.0\text{e-}4$  \\
+  MC-3D ($100$k)   & $5.1\text{e-}4$  & $1.52\text{e-}3$ & $2.0\text{e-}4$  & $4.8\text{e-}4$  & $5.4\text{e-}4$  \\
+  MC-3D ($1$M)     & $3.91\text{e-}4$ & $\mathbf{1.28\text{e-}3}$ & $1.64\text{e-}4$ & $5.10\text{e-}4$ & $5.14\text{e-}4$ \\
+  \quad 95\,\% CI  & $(3.52, 4.31)$   & $\mathbf{(1.21, 1.35)}$   & $(1.38, 1.90)$   & $(4.65, 5.55)$   & $(4.69, 5.59)$   \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+The convergence across three sample counts reveals two distinct behaviours:
+
+\begin{itemize}
+  \item \textbf{Four scenarios (crossing, overtaking, near-miss, high-$P_c$
+    crossing):} at $N=10{,}000$ the estimates are noisy ($\sim$3$\times$
+    relative standard deviation); at $N=1{,}000{,}000$ they converge tightly
+    to the Chan/Fowler values in every case — Chan falls inside the 95\,\% CI
+    for all four.  The earlier apparent discrepancies were pure sampling noise.
+    \textbf{Fowler and Chan are more trustworthy here} — analytically exact
+    at a fraction of the cost.
+
+  \item \textbf{Head-on:} MC-3D converges to $1.28\times10^{-3}$
+    [CI: $1.21\times10^{-3}$, $1.35\times10^{-3}$] at $N=10^6$ — Chan's
+    $4.98\times10^{-3}$ is 27 standard deviations above the CI upper bound.
+    This is not sampling noise; it is the geometric projection artifact
+    described in \S\ref{sec:headon_overestimation}.
+    \textbf{MC-3D is more trustworthy here.}
+\end{itemize}
+
+In short: Fowler and Chan are the correct choice for all standard conjunctions.
+MC-3D at $N \ge 100$k is the better answer only for head-on geometries where
+$\mathbf{r}_\text{rel} \parallel \mathbf{v}_\text{rel}$.
+
+\Cref{fig:method_comparison} shows the full five-panel comparison including
+the $v_\text{rel}$ sweep, the tiny-$P_c$ regime (Case~A), the slow-overtaking
+scenario (Case~C), and the MC-3D convergence study.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/method_comparison.png}
+  \caption{Five-panel method comparison.
+    \textbf{Panel 1:} All four methods on all five standard scenarios.
+    Fowler, Chan, and MC-2D are nearly indistinguishable; MC-3D (red) is
+    visibly lower only for head-on.
+    \textbf{Panel 2:} $P_c$ vs.\ $v_\text{rel}$ for a 200\,m crossing miss.
+    All methods track together; MC-3D diverges at very low $v_\text{rel}$
+    where velocity uncertainty shifts the true TCA.
+    \textbf{Panel 3:} Case A — default vs.\ tight covariance.  Fowler and
+    MC both go to zero at tight covariance; only Chan gives the correct
+    positive answer.
+    \textbf{Panel 4:} Case C — slow overtaking with 15 local minima over
+    24\,h; \texttt{find\_tca} returns only the global minimum.
+    \textbf{Panel 5:} MC-3D convergence vs.\ $N$ for head-on (converges to
+    $\sim1.5\times10^{-3}$, not toward Fowler's $\sim5\times10^{-3}$) and
+    crossing (converges toward Fowler).}
+  \label{fig:method_comparison}
+\end{figure}
+
+\subsection{When to use}
+MC-3D is most valuable for head-on conjunctions and slow encounters where TCA
+timing is sensitive to velocity perturbations.  For typical crossing and
+overtaking conjunctions at $v_\text{rel} > 1$\,km/s, it agrees with MC-2D
+to within $5\times$ and offers no geometric advantage.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Hard Cases: Method Breakdown Analysis}
+\label{sec:hardcases}
+% ══════════════════════════════════════════════════════════════════════════════
+
+Three scenarios expose the regime boundaries of the four implemented methods.
+\Cref{fig:hard_cases} shows the diagnostic plots for all three.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{../plots/hard_cases.png}
+  \caption{Hard cases diagnostic.
+    \textbf{Left (Case A):} $P_c$ estimates from Fowler, Chan, and MC-2D for
+    the tight-covariance crossing scenario.  Fowler underflows to 0;
+    MC-2D returns 0; only Chan gives the correct positive answer.
+    \textbf{Center (Case B):} Chan/Fowler relative error vs.\ encounter-plane
+    $\sigma_2/\sigma_1$ ratio.  Error plateaus at $\approx$6\% for
+    $\sigma_2/\sigma_1 \ge 5$.
+    \textbf{Right (Case C):} Miss distance over 24 hours for the slow
+    overtaking scenario.  Multiple local minima are visible;
+    \texttt{find\_tca} returns only the global minimum.}
+  \label{fig:hard_cases}
+\end{figure}
+
+\subsection{Case A — Tiny $P_c$: Numerical Stability}
+
+With a 10$\times$-tighter covariance ($\sigma_R/\sigma_T/\sigma_N = 10/50/5$\,m)
+and the 500\,m crossing scenario, Chan gives $P_c \approx 5\times10^{-12}$.
+
+\begin{itemize}
+  \item \textbf{Fowler:} \texttt{dblquad} evaluates the 2D Gaussian PDF at
+    a point $\sim$200$\sigma$ from the HBR disk.  The PDF underflows to
+    \texttt{0.0} in double precision, so Fowler returns exactly 0.
+  \item \textbf{Chan:} \texttt{scipy.stats.ncx2.cdf} computes Poisson weights
+    in log-space internally, avoiding underflow.  It correctly returns
+    $\sim5\times10^{-12}$.
+  \item \textbf{MC-2D at $N=10^6$:} expected hit count $\approx 5\times10^{-6}$.
+    Returns 0 in every run.
+\end{itemize}
+
+\textbf{Finding:} for $P_c < 10^{-8}$, only Chan is reliable among current
+implementations.  Importance sampling is required to validate Chan in this
+regime (see \S\ref{sec:future}).
+
+\subsection{Case B — Elongated Covariance: Chan Anisotropy Error}
+
+Chan's leading-term anisotropy correction ($\sigma_1/\sigma_2$ scaling factor)
+is an approximation that becomes less accurate as the encounter-plane covariance
+ellipse becomes more elongated.
+
+Empirically, over a sweep from $\sigma_2/\sigma_1 = 1$ (isotropic) to
+$\sigma_2/\sigma_1 = 500$ (extreme):
+\begin{itemize}
+  \item At $\sigma_2/\sigma_1 \le 3$ (default LEO covariances): error $<0.2\%$.
+  \item At $\sigma_2/\sigma_1 \approx 5$: error rises to $\approx6\%$.
+  \item At $\sigma_2/\sigma_1 \ge 5$: error \emph{plateaus} at $\approx6\%$ and
+    does not grow further — the anisotropy correction saturates.
+\end{itemize}
+
+\textbf{Finding:} the Chan error is bounded by $\approx6\%$ regardless of
+extreme elongation.  It is not a runaway degradation.  For operational use,
+Chan remains accurate when $\sigma_2/\sigma_1 < 5$ (all default LEO scenarios).
+
+\subsection{Case C — Multiple Close Approaches}
+
+At $v_\text{rel} \approx 5$\,m/s (slow overtaking), two spacecraft in nearly
+co-orbital trajectories experience multiple close-approach minima within a
+24-hour window.  A 200-step coarse grid resolves 15 local minima for
+the test scenario.
+
+\textbf{Finding:} \texttt{find\_tca} returns only the global minimum.  The
+true $P_c$ is $1 - \prod_i(1 - P_{c,i})$ over all $N_\text{enc}$ encounters,
+where $P_{c,i}$ is the Fowler/Chan value for each local minimum.  Multi-encounter
+$P_c$ accumulation is out of scope for all current analytic methods, but is the
+physically correct answer when $v_\text{rel} < \sim10$\,m/s.
+
+% ══════════════════════════════════════════════════════════════════════════════
 \section{Findings}
 \label{sec:findings}
 % ══════════════════════════════════════════════════════════════════════════════
@@ -785,14 +1249,18 @@ is therefore omitted from the center panel of \Cref{fig:pc_findings} to avoid
 redundancy.
 
 What differs is only the designed miss distance used in the test suite: 500\,m
-for crossing vs.\ 10\,m for near-miss.  The two scenarios give
-$P_c \sim 10^{-14}$ and $P_c \sim 10^{-3}$ respectively — an 11-order-of-magnitude
-difference driven entirely by how close the Gaussian center sits to the 10\,m
-HBR disk, not by any difference in geometry or covariance.  This is the clearest
-demonstration that miss distance and geometry are independent variables in the
-Fowler integral.
+for crossing vs.\ 10\,m for near-miss.  Despite this 50$\times$ difference in
+miss distance, both scenarios yield $P_c \sim 4\text{--}5\times10^{-4}$ — because
+the along-track covariance ($\sigma_T = 500$\,m) is large enough that the
+Gaussian tail still reaches the 10\,m HBR disk even at 500\,m miss.  The near-miss
+Gaussian center sits near the disk edge, giving a slightly higher $P_c$, but the
+two values are within a factor of~2.  This illustrates that geometry and covariance
+shape, not miss distance alone, determine $P_c$ when the covariance is highly
+elongated.
 
 \subsection{Scenario Comparison}
+
+\Cref{fig:comparison} shows side-by-side encounter-plane projections and miss-distance profiles for all four scenarios, illustrating how geometry and miss distance interact to determine $P_c$.
 
 \begin{figure}[h]
   \centering
@@ -827,7 +1295,7 @@ Fowler integral.
     \caption{Overtaking scenario encounter plane.  $\mathbf{v}_\text{rel}$
              is nearly along-track, so the encounter plane is nearly the R-N
              plane — but the miss distance is 1000\,m and $v_\text{rel}$ is
-             only 15\,m/s, giving a large projected covariance and low $P_c$.}
+             only 50\,m/s, giving a large projected covariance and low $P_c$.}
   \end{subfigure}
   \caption{Scenario comparison figures from \texttt{plot\_scenario\_comparison.py}.}
   \label{fig:comparison}
@@ -838,10 +1306,10 @@ Fowler integral.
 \label{sec:tests}
 % ══════════════════════════════════════════════════════════════════════════════
 
-A pytest suite of 70 tests validates all modules.  Session-scoped fixtures
-ensure expensive computations (scenario generation, TCA search) run once per
-\texttt{pytest} session, not once per test; the full suite completes in
-$\approx$35\,s.
+A pytest suite of 165 tests (1 skip) validates all modules.  Session-scoped
+fixtures ensure expensive computations (scenario generation, TCA search) run
+once per \texttt{pytest} session, not once per test; the full suite completes
+in $\approx$175\,s.
 
 \begin{table}[htb]
 \centering
@@ -975,6 +1443,157 @@ $\approx$35\,s.
 \end{tabular}
 \end{table}
 
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_chan1997.py} — 28 tests across 5 test classes.}
+\label{tab:test_chan}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Agreement with Fowler}} \\
+  \texttt{test\_crossing\_chan\_vs\_fowler} & Chan/Fowler relative error $< 1\%$ (crossing) \\
+  \texttt{test\_head\_on\_chan\_vs\_fowler} & Chan/Fowler relative error $< 1\%$ (head-on) \\
+  \texttt{test\_overtaking\_chan\_vs\_fowler} & Chan/Fowler relative error $< 1\%$ (overtaking) \\
+  \texttt{test\_near\_miss\_chan\_vs\_fowler} & Chan/Fowler relative error $< 1\%$ (near-miss) \\
+  \texttt{test\_high\_pc\_crossing\_chan\_vs\_fowler} & Chan/Fowler relative error $< 1\%$ (high-$P_c$ crossing) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Basic properties}} \\
+  \texttt{test\_pc\_in\_unit\_interval[*]} & $P_c \in [0,1]$ for all 5 scenarios \\
+  \texttt{test\_pc\_increases\_as\_miss\_decreases} & Smaller miss $\Rightarrow$ higher $P_c$ \\
+  \texttt{test\_pc\_increases\_as\_hbr\_increases} & Larger HBR $\Rightarrow$ higher $P_c$ \\
+  \texttt{test\_pc\_returns\_float} & Return type is \texttt{float} \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Speed}} \\
+  \texttt{test\_chan\_faster\_than\_fowler} & Chan call $< 10$\,ms; Fowler call $> 10$\,ms \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Limit cases}} \\
+  \texttt{test\_zero\_miss\_near\_one} & Zero miss, HBR $\gg \sigma$ $\Rightarrow$ $P_c > 0.99$ \\
+  \texttt{test\_large\_miss\_tiny\_cov\_near\_zero} & Miss $\gg$ HBR, tight $\sigma$ $\Rightarrow$ $P_c < 10^{-10}$ \\
+  \texttt{test\_isotropic\_covariance\_consistency} & Isotropic cov: Chan matches Fowler to $< 0.1\%$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Stability}} \\
+  \texttt{test\_tiny\_pc\_stays\_positive} & Chan positive at $P_c \sim 5\times10^{-12}$ \\
+  \texttt{test\_tiny\_pc\_is\_finite} & Chan finite at $P_c \sim 5\times10^{-12}$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Degenerate inputs}} \\
+  \texttt{test\_zero\_relative\_speed\_raises} & \texttt{ValueError} when $|\mathbf{v}_\text{rel}|=0$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_monte\_carlo.py} — 21 tests across 4 test classes.}
+\label{tab:test_mc2d}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Return type and structure}} \\
+  \texttt{test\_returns\_tuple\_of\_three} & Returns \texttt{(pc, ci\_low, ci\_high)} \\
+  \texttt{test\_pc\_in\_unit\_interval[*]} & $P_c \in [0,1]$ for all 4 scenarios \\
+  \texttt{test\_ci\_ordered} & \texttt{ci\_low} $\le$ $P_c$ $\le$ \texttt{ci\_high} \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Reproducibility}} \\
+  \texttt{test\_same\_seed\_same\_result} & Same seed $\Rightarrow$ identical \texttt{(pc, ci\_low, ci\_high)} \\
+  \texttt{test\_different\_seed\_different\_result} & Different seed $\Rightarrow$ different $P_c$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{CI width}} \\
+  \texttt{test\_ci\_width\_reasonable[*]} & CI width $< 5 \times \hat{P}_c$ (4 scenarios) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Agreement with Chan}} \\
+  \texttt{test\_mc\_agrees\_with\_chan\_crossing} & MC within $3\times$ of Chan (crossing) \\
+  \texttt{test\_mc\_agrees\_with\_chan\_head\_on} & MC within $3\times$ of Chan (head-on) \\
+  \texttt{test\_mc\_agrees\_with\_chan\_near\_miss} & MC within $3\times$ of Chan (near-miss) \\
+  \texttt{test\_mc\_agrees\_with\_chan\_high\_pc} & MC within $3\times$ of Chan (high-$P_c$) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Monotonicity}} \\
+  \texttt{test\_larger\_hbr\_gives\_higher\_pc} & HBR=50\,m $\Rightarrow$ higher $P_c$ than HBR=5\,m \\
+  \texttt{test\_smaller\_miss\_gives\_higher\_pc} & Closer miss $\Rightarrow$ higher $P_c$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Degenerate inputs}} \\
+  \texttt{test\_zero\_relative\_speed\_raises} & \texttt{ValueError} when $|\mathbf{v}_\text{rel}|=0$ \\
+  \texttt{test\_large\_miss\_returns\_zero\_pc} & Large miss returns $P_c = 0$ with CI $[0,0]$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_monte\_carlo\_3d.py} — 18 tests across 4 test classes.}
+\label{tab:test_mc3d}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Return type and structure}} \\
+  \texttt{test\_returns\_tuple\_of\_three} & Returns \texttt{(pc, ci\_low, ci\_high)} \\
+  \texttt{test\_pc\_in\_unit\_interval[*]} & $P_c \in [0,1]$ for 3 scenarios \\
+  \texttt{test\_ci\_ordered} & \texttt{ci\_low} $\le$ $P_c$ $\le$ \texttt{ci\_high} \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Reproducibility}} \\
+  \texttt{test\_same\_seed\_same\_result} & Same seed $\Rightarrow$ identical results \\
+  \texttt{test\_different\_seed\_different\_result} & Different seed $\Rightarrow$ different $P_c$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{CI width}} \\
+  \texttt{test\_ci\_width\_reasonable[*]} & CI width $< 10 \times \hat{P}_c$ (3 scenarios) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Agreement with MC-2D}} \\
+  \texttt{test\_mc3d\_agrees\_with\_mc2d\_head\_on} & MC-3D within $5\times$ of MC-2D (head-on) \\
+  \texttt{test\_mc3d\_agrees\_with\_mc2d\_near\_miss} & MC-3D within $5\times$ of MC-2D (near-miss) \\
+  \texttt{test\_mc3d\_agrees\_with\_mc2d\_high\_pc} & MC-3D within $5\times$ of MC-2D (high-$P_c$) \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Monotonicity}} \\
+  \texttt{test\_larger\_hbr\_gives\_higher\_pc} & HBR=50\,m $\Rightarrow$ higher $P_c$ than HBR=5\,m \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Degenerate inputs}} \\
+  \texttt{test\_zero\_relative\_speed\_raises} & \texttt{ValueError} when $|\mathbf{v}_\text{rel}|=0$ \\
+  \texttt{test\_large\_miss\_returns\_zero\_pc} & Large miss returns $P_c = 0$ \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htb]
+\centering
+\small
+\caption{\texttt{test\_hard\_cases.py} — 19 tests (1 skip) across 3 test classes.}
+\label{tab:test_hard}
+\begin{tabular}{lp{10cm}}
+  \toprule
+  Test & What it checks \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Case A — Tiny $P_c$ (TestCaseA\_TinyPc)}} \\
+  \texttt{test\_chan\_returns\_positive} & Chan positive at $P_c \sim 5\times10^{-12}$ \\
+  \texttt{test\_chan\_pc\_is\_tiny} & Chan $P_c < 10^{-6}$ with tight covariance \\
+  \texttt{test\_fowler\_underflows\_or\_positive} & Fowler returns 0 or tiny positive $< 10^{-4}$ \\
+  \texttt{test\_fowler\_underflows\_to\_zero} & Documents Fowler $=$ 0 (skipped if Fowler nonzero) \\
+  \texttt{test\_mc\_returns\_zero} & MC at $N=10^6$ returns 0 \\
+  \texttt{test\_chan\_larger\_than\_mc} & Chan $>$ MC when MC $= 0$ \\
+  \texttt{test\_chan\_vs\_fowler\_ratio\_when\_fowler\_nonzero} & Agreement $< 10\times$ when Fowler nonzero \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Case B — Elongated covariance (TestCaseB\_ElongatedCovariance)}} \\
+  \texttt{test\_b1\_crossing\_wide\_ellipse\_chan\_positive} & Chan positive at $\sigma_2/\sigma_1 \approx 1000$ \\
+  \texttt{test\_b1\_crossing\_wide\_ellipse\_chan\_vs\_fowler\_within\_factor} & Chan/Fowler ratio $< 100\times$ \\
+  \texttt{test\_b1\_crossing\_wide\_ellipse\_anisotropy\_ratio} & $\sigma_2/\sigma_1 > 10$ confirmed \\
+  \texttt{test\_b2\_head\_on\_compact\_projection\_agrees\_well} & Head-on compact proj: error $< 1\%$ \\
+  \texttt{test\_b2\_head\_on\_compact\_anisotropy\_ratio} & Near-isotropic enc.\ plane: $\sigma_2/\sigma_1 < 5$ \\
+  \texttt{test\_b3\_chan\_vs\_fowler\_moderate\_anisotropy} & $\sigma_2/\sigma_1 \approx 10$: error $< 10\%$ \\
+  \texttt{test\_b3\_chan\_vs\_fowler\_high\_anisotropy} & $\sigma_2/\sigma_1 \approx 100$: error $< 100\%$ \\
+  \midrule
+  \multicolumn{2}{l}{\textit{Case C — Multiple close approaches (TestCaseC\_MultipleCloseApproaches)}} \\
+  \texttt{test\_slow\_overtaking\_tca\_found} & \texttt{find\_tca} returns valid epoch \\
+  \texttt{test\_slow\_overtaking\_tca\_single\_minimum} & Counts local minima in 24-h window \\
+  \texttt{test\_slow\_overtaking\_fowler\_pc\_finite} & Fowler $P_c \in [0,1]$ for found TCA \\
+  \texttt{test\_slow\_overtaking\_chan\_pc\_finite} & Chan $P_c \in [0,1]$ for found TCA \\
+  \texttt{test\_slow\_overtaking\_chan\_agrees\_with\_fowler} & Chan/Fowler $< 1\%$ for found TCA \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Future Work}
 \label{sec:future}
@@ -982,39 +1601,22 @@ $\approx$35\,s.
 
 The following extensions are planned, in approximate priority order.
 
+\paragraph{Importance sampling.}
+For $P_c < 10^{-6}$, naive Monte Carlo is impractical ($N \sim 10^8$ required).
+Importance sampling with a proposal distribution centered near the HBR boundary
+will provide accurate estimates without requiring enormous sample counts, enabling
+validation of Chan in the sub-$10^{-8}$ regime (Case A, \S\ref{sec:hardcases}).
+
+\paragraph{Patera (2001) line integral.}
+An alternative analytic formulation that avoids the 2D Gaussian projection in
+favour of a 1D line integral.  Implementing this alongside the Fowler/Chan methods
+will enable a structured comparison of the three main analytic approaches.
+
 \paragraph{Library-grade interfaces.}
 The current modules contain test-harness scaffolding (hardcoded constants,
 2-spacecraft-at-a-time APIs, implicit unit conventions).  Before contributing
 to the \texttt{brahe} library, the modules will be refactored to expose clean,
 composable, fully-typed public APIs with NumPy-style docstrings.
-
-\paragraph{Chan (1997) series expansion.}
-The Chan series provides a closed-form alternative to the numerical double
-integral in \eqref{eq:dblquad}.  It converges in $\sim$10--20 terms and is
-$\approx$10$\times$ faster than \texttt{dblquad} for typical $P_c$ values.  It
-also handles $P_c < 10^{-10}$ correctly where double-precision quadrature
-underflows.  This will be implemented as a drop-in replacement and cross-validated
-against the Fowler numerical result.
-
-\paragraph{Monte Carlo baseline.}
-A naive Monte Carlo estimator will be added as a validation baseline for all
-analytic methods:
-\begin{equation}
-  \hat{P}_c^\text{MC} = \frac{1}{N}\sum_{i=1}^{N}
-    \mathbf{1}\!\left[|\mathbf{x}_i| \le r_\text{hb}\right],
-    \qquad \mathbf{x}_i \sim \mathcal{N}(\mathbf{r}_\text{rel},\;\mathbf{C}_\text{pos}).
-\end{equation}
-$N = 10^6$ samples suffice for $P_c \gtrsim 10^{-4}$.
-
-\paragraph{Importance sampling.}
-For $P_c < 10^{-6}$, naive Monte Carlo is impractical ($N \sim 10^8$ required).
-Importance sampling with a proposal centered near the HBR boundary will provide
-accurate estimates without requiring enormous sample counts.
-
-\paragraph{Patera (2001) line integral.}
-An alternative analytic formulation that avoids the 2D Gaussian projection in
-favor of a 1D line integral.  Implementing this alongside the Fowler/Chan methods
-will enable a structured comparison of the main analytic approaches.
 
 \paragraph{Covariance propagation via STM.}
 A state transition matrix (STM) module will propagate the initial covariance

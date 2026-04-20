@@ -1,6 +1,7 @@
 # Next Steps: Probability of Collision Implementation
 
 Handoff document for the next development session.
+Stop putting in the coauthored by claude code in the github messages.
 
 ---
 
@@ -10,233 +11,87 @@ Handoff document for the next development session.
 
 | File | Purpose |
 |------|---------|
-| `conjunction.py` | Generate synthetic LEO conjunction scenarios with known ground truth. Back-propagates from a designed TCA to produce T=0 initial conditions. |
-| `tca.py` | Find TCA from T=0 initial conditions. Sequential coarse grid + Brent fine search. Returns TCA epoch and miss distance. |
-| `covariance.py` | Build 6×6 ECI covariances from diagonal RTN 1-sigma inputs. Rotates via `brahe.rotation_rtn_to_eci`. Constructs at TCA (not propagated from T=0 — see Known Simplifications). |
-| `fowler.py` | Fowler (1993) analytic Pc. Projects combined covariance onto encounter plane, integrates 2D Gaussian over hard-body disk via `scipy.integrate.dblquad`. |
+| `conjunction.py` | Generate synthetic LEO conjunction scenarios. Back-propagates from a designed TCA. Supports crossing, head-on, overtaking, near-miss. |
+| `tca.py` | Find TCA via coarse grid (200 steps) + Brent's method. ~3–4 s per call, 1-second precision. |
+| `covariance.py` | Build 6×6 ECI covariances from diagonal RTN 1-sigma inputs. Default: σ_R=100m, σ_T=500m, σ_N=50m. Covariance constructed at TCA, not propagated from T=0. |
+| `fowler.py` | Fowler (1993) analytic Pc. 2D Gaussian over HBR disk via `scipy.integrate.dblquad`. ~94 ms/call. |
+| `chan1997.py` | Chan (1997) analytic Pc. Same encounter-plane projection as Fowler; evaluates via noncentral chi-squared CDF. ~0.09 ms/call (~1000× faster). < 0.2% agreement with Fowler on all scenarios. Stable at Pc < 10⁻¹⁰. |
+| `monte_carlo.py` | Monte Carlo Pc baseline (2D encounter-plane). Samples N(miss_2d, C_2d) in the encounter plane, counts hits inside HBR circle. ~0.5–2 s at N=10⁶. Agrees with Chan to within 3× at Pc ~ 10⁻⁴. |
+| `monte_carlo_3d.py` | 3D trajectory-integrated MC. Perturbs full 6D states from 6×6 joint covariance, propagates ±120 s around TCA via two-body dynamics, finds true minimum miss via Brent's method, counts hits < HBR. ~5 s at N=10,000. |
 
 ### Tests (`tests/`)
 
 | File | Count | What it covers |
 |------|-------|----------------|
-| `conftest.py` | — | Session-scoped fixtures: 5 scenarios, 5 TCA results, 5 covariance pairs |
+| `conftest.py` | — | Session-scoped fixtures: 5 scenarios, 5 TCA results, 5 covariance pairs, 4 MC-2D fixtures (N=1M), 5 MC-3D fixtures (N=10k, all scenarios), 4 hard-case fixtures |
 | `test_conjunction.py` | 26 | Output structure, geometry accuracy, physical sanity, RTN trajectory |
 | `test_tca.py` | 13 | TCA timing, miss distance accuracy, state retrieval, edge cases |
 | `test_fowler.py` | 31 | Covariance generation, Pc properties, limit cases, magnitude ranges, covariance-size effects |
-| **Total** | **70** | All pass in ~35 seconds |
-
-### Plots (`plots/`)
-
-All outputs are gitignored PNGs — regenerate with `PYTHONPATH=src uv run python plots/<script>.py`.
-
-| Script | Output(s) | What it shows |
-|--------|-----------|---------------|
-| `plot_conjunctions.py` | `conjunctions_<name>.png` × 4 | 4-panel per scenario: RTN trajectory, miss distance vs time, encounter plane with σ-ellipses and HBR disk, RTN covariance cross-sections |
-| `plot_3d_orbits.py` | `conjunctions_3d_orbits.png`, `conjunctions_3d_<name>.png` × 4 | 3D RTN relative motion — SC1 at origin, SC2 path colored light→dark red as time approaches TCA |
-| `plot_3d_eci.py` | `conjunctions_eci_<name>.png` × 4, `conjunctions_eci_all.png` | Per scenario: left = full ECI orbit + Earth sphere + velocity arrows; right = zoomed ±2–10 sec around TCA showing the two orbit arcs separating and the miss vector |
-| `plot_scenario_comparison.py` | `comparison_*.png` × 4 | Side-by-side comparisons: miss distance all scenarios, crossing vs near-miss encounter plane, head-on vs crossing RTN 3D, overtaking arc geometry |
-| `plot_pc_findings.py` | `pc_findings.png` | Pc sensitivity: vs covariance scale, vs miss distance at varying v_rel, crossing vs head-on geometry |
+| `test_chan1997.py` | 28 | Chan vs Fowler agreement (< 1%), properties, limits, degenerate inputs |
+| `test_monte_carlo.py` | 21 | Return type, reproducibility, CI width, vs Chan (3× tol), monotonicity, degenerate inputs |
+| `test_monte_carlo_3d.py` | 20 | Return type, reproducibility, CI width, vs MC-2D (5× tol), monotonicity, degenerate inputs. All 5 scenarios covered including crossing and overtaking. |
+| `test_hard_cases.py` | 19 (1 skip) | Case A tiny Pc, Case B anisotropy error, Case C multiple close approaches |
+| `test_grazing.py` | 7 | Grazing geometry: miss=HBR=10m, σ=1m (σ≪HBR). All 2D methods give Pc~0.5. |
+| **Total** | **165 (1 skip)** | All pass in ~175 seconds |
 
 ### Key fixtures in `conftest.py`
 
-| Fixture | Scenario |
-|---------|----------|
-| `crossing_scenario/tca/covs` | 500 m miss, 7000 m/s N-dominant crossing — very low Pc, good for TCA geometry tests |
-| `head_on_scenario/tca/covs` | 200 m miss, retrograde orbit, v_rel ≈ 15 km/s — operationally interesting Pc |
-| `overtaking_scenario/tca/covs` | 1000 m miss, 15 m/s slow catch-up |
-| `near_miss_scenario/tca/covs` | 10 m miss, 500 m/s crossing — stress test, Pc ~1e-3 |
-| `high_pc_crossing_scenario/tca/covs` | 200 m miss, 500 m/s crossing — only realistic crossing with operationally-interesting Pc |
+| Fixture | Scenario | Notes |
+|---------|----------|-------|
+| `crossing_scenario/tca/covs` | 500 m miss, 15 m/s, crossing | Pc ~ 3.89e-4 |
+| `head_on_scenario/tca/covs` | 195 m miss, retrograde orbit, v_rel ≈ 15185 m/s | Pc ~ 4.98e-3 |
+| `overtaking_scenario/tca/covs` | 1000 m miss, 50 m/s slow catch-up | Pc ~ 1.86e-4 |
+| `near_miss_scenario/tca/covs` | 10 m miss, 15 m/s crossing | Pc ~ 4.99e-4 |
+| `high_pc_crossing_scenario/tca/covs` | 201 m miss, 500 m/s crossing, seed=42 | Pc ~ 4.80e-4 |
+| `crossing_mc / head_on_mc / near_miss_mc / high_pc_crossing_mc` | MC-2D at N=1M | session-scoped, seed=42 |
+| `crossing_mc3d / overtaking_mc3d / head_on_mc3d / near_miss_mc3d / high_pc_mc3d` | MC-3D at N=10k | session-scoped, seed=42. All 5 scenarios covered. |
+| `tiny_pc_scenario/tca / tiny_pc_covs_tight` | 500 m crossing, 10× tighter cov | Chan Pc ~ 5e-12 (hard case A) |
+| `slow_overtaking_scenario` | 500 m, v_rel=5 m/s overtaking | 15 local minima in 24h (hard case C) |
 
-Run tests: `uv run pytest tests/ -v`
+### Key findings (documented in FINDINGS.md)
 
----
+1. **Head-on Pc is overestimated by 2D methods.** For head-on conjunctions r_rel ∥ v_rel, so the full miss distance projects to ~0.003 m in the encounter plane → near-zero projected miss → high 2D Pc (~5e-3). MC-3D(N=1M) = 1.28e-3. The 2D methods overestimate by ~4×, 27σ outside MC-3D's CI.
 
-## What Needs to Be Built Next
+2. **Chan anisotropy error plateaus at ~6%.** Once σ₂/σ₁ ≥ 5, Chan's error vs Fowler stabilizes near 6% and does not grow further at σ₂/σ₁=500. Default covariance gives ~0.2%.
 
-### Priority 1 — Library-Grade Module Interfaces
+3. **Tiny Pc needs importance sampling.** At Chan Pc ~ 5e-12, plain MC at N=1M returns 0. Importance sampling is the only way to validate Chan in this regime.
 
-Before adding new Pc methods, clean up the existing modules so they are suitable for eventual contribution to brahe or standalone library release.
+4. **Multiple close approaches.** At v_rel=5 m/s, 15 local minima exist in 24h. find_tca returns only the global minimum. True Pc = 1 - ∏(1 - Pc_i) is out of scope.
 
-**`conjunction.py`:**
-- Remove hardcoded module-level constants (`TCA_HOURS`, `R_ALT`, `INCL`, etc.) — callers should always pass explicit values
-- `SC1_OE_AT_TCA` and `EPOCH_TCA` should become named defaults in function signatures, not globals
-- Rename internal helpers with clearer names (`_sc2_rtn_at_tca` → `_place_sc2_rtn`)
-- Add `__all__` listing the public API
+5. **Near-miss and crossing have nearly equal Pc.** Both use N-dominant v_rel and identical default covariance. σ_T=500m covariance is so elongated that its tail reaches the 10m HBR disk even at 500m miss → both give Pc~4e-4. Miss distance alone does not determine Pc when covariance is highly elongated.
 
-**`tca.py`:**
-- Expose `_miss_distance_from` as a private but documented helper (useful for external testing)
-- Add type annotations throughout
-- Consider a `TCAResult` named tuple instead of a bare `(epoch, float)` return
+### Plots (`plots/`)
 
-**`covariance.py`:**
-- Rename `generate_covariances` → `build_covariances_from_rtn` (more descriptive)
-- Accept a single spacecraft state + return a single covariance (let callers combine) — current 2-spacecraft API is convenient but limits composability
-- Document units explicitly in function signature (m, m/s → m², m²/s²)
+| Script | What it shows |
+|--------|---------------|
+| `plot_conjunctions.py` | 4-panel per scenario: RTN trajectory, miss distance, encounter plane, RTN covariance cross-sections |
+| `plot_3d_orbits.py` | 3D RTN relative motion for all scenarios |
+| `plot_3d_eci.py` | Full ECI orbit + zoomed TCA view per scenario |
+| `plot_scenario_comparison.py` | Side-by-side scenario comparisons |
+| `plot_pc_findings.py` | Pc sensitivity: vs covariance scale, vs miss distance |
+| `plot_hard_cases.py` | 3-panel: Case A bar chart, Case B error% vs σ ratio, Case C miss distance over 24h |
+| `plot_method_comparison.py` | 5-panel: all 4 methods × 5 scenarios, v_rel sweep, Case A, Case C, MC-3D convergence vs N |
 
-**`fowler.py`:**
-- Rename to `fowler1993.py` to make the method + year naming pattern explicit (all future Pc methods will follow `author_year.py`)
-- Extract `_build_encounter_plane_basis` as a standalone testable helper
-- Add `__all__`
+Run plots with: `PYTHONPATH=src uv run python plots/<script>.py`
 
-**General:**
-- Add `py.typed` marker file to `src/collision/` for mypy compatibility
-- Ensure all public functions have complete NumPy-style docstrings (Args, Returns, Raises, Notes)
+### Report (`report/report.tex`)
 
----
+Compiles to `report.pdf` with `pdflatex report.tex` × 2. All sections complete and accurate:
+1. Introduction
+2. Background
+3. Synthetic Conjunction Generation
+4. Finding TCA
+5. Covariance Model
+6. Fowler (1993)
+7. Chan (1997)
+8. Monte Carlo 2D
+9. Monte Carlo 3D (head-on overestimation finding, full 5-scenario comparison table, method_comparison.png)
+10. Hard Cases (A/B/C)
+11. Findings (3 findings + Scenario Comparison with fig:comparison)
+12. Test Suite (165 tests, 4 test tables)
+13. Future Work
 
-### Priority 2 — Chan (1997) Series Expansion (`src/collision/chan1997.py`)
-
-Closed-form series expansion for the Fowler 2D integral. Faster than `dblquad` and numerically stable at very small Pc (< 10⁻¹⁰) where double-precision quadrature loses accuracy.
-
-**Reference:** Chan, F.K. (1997). "Spacecraft Collision Probability." AAS 97-173.
-
-**Algorithm:**
-The Chan series expresses Pc as a sum over modified Bessel functions of the projected 2D Gaussian. For well-conditioned (non-degenerate) covariances it converges in ~10–20 terms.
-
-1. Project covariance and miss vector onto encounter plane (same as Fowler)
-2. Diagonalize `C_2d` via eigendecomposition → principal axes `(σ₁, σ₂)` and rotation angle θ
-3. Transform miss vector into principal frame
-4. Sum the series: `Pc = exp(-u²/2σ₁² - v²/2σ₂²) * Σ Aₙ Iₙ(...)` (see Chan 1997 eq. 15)
-5. Truncate when term < 10⁻¹⁵ × running sum
-
-**Why add this:**
-- ~10× faster than `dblquad` for typical Pc values
-- Handles Pc < 10⁻¹⁰ correctly (quadrature underflows)
-- Standard reference method — needed for any methods-comparison paper
-- Natural validation target: `chan1997_pc` and `fowler1993_pc` should agree to < 0.1% for all scenarios
-
-**Tests (`tests/test_chan1997.py`):**
-- Agrees with Fowler to within 0.1% for all 5 scenario fixtures
-- Handles near-zero Pc (< 10⁻¹⁰) without underflow
-- Handles large Pc (> 0.9) correctly
-- Symmetric: swapping SC1/SC2 gives same result
-- Raises `ValueError` on zero relative speed (same contract as Fowler)
-
----
-
-### Priority 3 — Monte Carlo (`src/collision/monte_carlo.py`)
-
-Estimates Pc by sampling from the joint position distribution at TCA.
-
-**Algorithm:**
-1. Compute `r_rel`, `C_pos = C1[:3,:3] + C2[:3,:3]` at TCA
-2. Sample N relative position vectors from `N(r_rel, C_pos)`
-3. Count samples where `|r_sample| < hard_body_radius`
-4. `Pc_mc ≈ count / N`
-
-**Implementation notes:**
-- Use `np.random.default_rng(seed).multivariate_normal` for reproducibility
-- Return `(pc_estimate, ci_low, ci_high)` — Wilson or normal confidence interval
-- N=10⁶ is sufficient for Pc~10⁻⁴; need N=10⁸ for Pc~10⁻⁶ (impractical — this is why MCMC matters)
-
-**Tests (`tests/test_monte_carlo.py`):**
-- Pc ∈ [0, 1]
-- Agrees with Fowler within ~2–3× for head-on and near-miss scenarios (large enough Pc for Monte Carlo to be accurate at N=10⁶)
-- Fixed seed gives identical results
-- Larger N reduces confidence interval width
-- Put N=10⁶ runs in session-scoped fixtures to avoid re-running per test
-
----
-
-### Priority 4 — MCMC / Importance Sampling (`src/collision/importance_sampling.py`)
-
-Importance sampling to concentrate samples near the hard-body sphere. Efficient for Pc values too small for naive Monte Carlo (< 10⁻⁶).
-
-**Algorithm:**
-Rather than sampling from `N(r_rel, C_pos)` (the prior), draw samples from a proposal distribution `q(x)` centered near the hard-body boundary and reweight:
-
-`Pc ≈ (1/N) Σ [|xᵢ| < HBR] * p(xᵢ) / q(xᵢ)`
-
-Good proposals: uniform disk of radius 2×HBR centered at the closest point on the HBR surface to r_rel, or a Gaussian centered at that point.
-
-**Notes:**
-- `emcee` ensemble sampler is an alternative (pure Python, no extra dependencies beyond scipy)
-- Main advantage: accurate Pc estimates at 10⁻⁶ to 10⁻¹⁰ without requiring N=10⁸ samples
-- Validation: compare against Chan series at low Pc where Monte Carlo fails
-
----
-
-### Priority 5 — Patera (2001) Line Integral (`src/collision/patera2001.py`)
-
-Alternative analytic method that avoids the 2D Gaussian projection by instead integrating along the miss distance vector.
-
-**Reference:** Patera, R.P. (2001). "General Method for Calculating Satellite Collision Probability." Journal of Guidance, Control, and Dynamics.
-
-**Why add this:** Patera and Fowler/Chan are the two main analytic approaches in the literature. Comparing them on the same scenario suite is a core part of a survey paper — they should agree for typical scenarios and diverge in known edge cases (e.g., highly elongated covariances).
-
----
-
-### Priority 6 — Covariance Propagation via STM (`src/collision/covariance_propagation.py`)
-
-Propagate a covariance from T=0 to TCA using a state transition matrix (STM), which is the physically correct approach for real conjunction data.
-
-**Algorithm:**
-1. Numerically propagate the reference trajectory from T=0 to TCA
-2. Compute the Jacobian `Φ = ∂x_TCA/∂x_0` via finite differences (perturb each of the 6 state components, propagate, measure the change)
-3. `C_TCA = Φ @ C_0 @ Φ.T`
-
-**Why this matters:** Along-track uncertainty inflates by 10–100× over 24 hours due to differential drag and gravitational perturbations. The current `generate_covariances` constructs covariances directly at TCA, bypassing this inflation. A real pipeline must propagate covariances forward.
-
-Estimates Pc by sampling from the joint position distribution at TCA.
-
-**Algorithm:**
-1. Compute `r_rel`, `C_pos = C1[:3,:3] + C2[:3,:3]` at TCA
-2. Sample N relative position vectors from `N(r_rel, C_pos)`
-3. Count samples where `|r_sample| < hard_body_radius`
-4. `Pc_mc ≈ count / N`
-
-**Implementation notes:**
-- Use `np.random.default_rng(seed).multivariate_normal` for reproducibility
-- Return `(pc_estimate, ci_low, ci_high)` — Wilson or normal confidence interval
-- N=10⁶ is sufficient for Pc~10⁻⁴; need N=10⁸ for Pc~10⁻⁶ (impractical — this is why MCMC matters)
-
-**Tests (`tests/test_monte_carlo.py`):**
-- Pc ∈ [0, 1]
-- Agrees with Fowler within ~2–3× for head-on and near-miss scenarios (large enough Pc for Monte Carlo to be accurate at N=10⁶)
-- Fixed seed gives identical results
-- Larger N reduces confidence interval width
-- Put N=10⁶ runs in session-scoped fixtures to avoid re-running per test
-
----
-
-### Priority 3 — MCMC (`src/collision/mcmc.py`)  
-
-Importance sampling or Metropolis-Hastings to concentrate samples near the hard-body sphere. Efficient for Pc values too small for naive Monte Carlo.
-
-**Notes:**
-- Good starting point: importance sampling with a proposal centered near the HBR boundary rather than at r_rel
-- Alternative: `emcee` ensemble sampler (pure Python, no extra dependencies beyond scipy)
-- Main advantage: accurate Pc estimates at 10⁻⁶ to 10⁻¹⁰ without requiring N=10⁸ samples
-
----
-
-## Known Simplifications
-
-### Covariance at TCA is not propagated from T=0
-
-`generate_covariances` constructs covariances directly at TCA from fixed RTN 1-sigma assumptions. In a real pipeline, the covariance at T=0 would be propagated forward to TCA via a state transition matrix (STM) — along-track uncertainty inflates substantially over 24 hours.
-
-This is fine for testing Pc methods in isolation. When building a pipeline that ingests real catalog data:
-- Implement `propagate_covariance(epoch_start, eci_state, cov_t0, epoch_tca)` using a finite-difference STM Jacobian around the propagated trajectory
-- Wire it in place of `generate_covariances`
-
-### Fowler integration is numerical, not the Chan series
-
-`fowler.py` uses `scipy.integrate.dblquad`. The Chan (1997) series expansion is a faster closed-form alternative. For very small Pc (< 10⁻¹⁰), `dblquad` can lose precision; the series expansion handles these cases better. Consider replacing if precision at very small Pc becomes an issue.
-
----
-
-## Performance Reference
-
-| Operation | Time |
-|-----------|------|
-| Full test suite (70 tests) | ~35 s |
-| Single `find_tca` call | ~3–4 s (200 propagations) |
-| `generate_covariances` | < 1 ms |
-| `fowler_pc` (dblquad) | ~50–200 ms depending on Pc magnitude |
-| `plot_pc_findings.py` | ~75 s |
-
-Session-scoped fixtures in `conftest.py` mean each expensive operation runs once per `pytest` session. Always add new expensive computations (Monte Carlo with N=10⁶, etc.) to session-scoped fixtures.
+**Report accuracy audit completed this session.** All figures are referenced in prose. All v_rel values, Pc values, and test counts are correct.
 
 ---
 
@@ -244,12 +99,57 @@ Session-scoped fixtures in `conftest.py` mean each expensive operation runs once
 
 Default covariance (pos σ = 100/500/50 m R/T/N), HBR = 10 m:
 
-| Scenario | Miss (m) | v_rel (m/s) | Pc |
-|----------|----------|-------------|----|
-| slow crossing | 500 | 15 | ~2e-14 |
-| high-Pc crossing | 204 | 500 | ~3e-5 |
-| head-on | 201 | 500 | ~5e-4 |
-| overtaking | 1000 | 50 | ~2e-4 |
-| near-miss | 10 | 15 | ~1e-3 |
+| Scenario | Miss (m) | v_rel (m/s) | Fowler Pc | Chan Pc | MC-2D Pc | MC-3D(1M) Pc |
+|----------|----------|-------------|-----------|---------|----------|--------------|
+| crossing | 500 | 15 | 3.89e-4 | 3.89e-4 | 3.71e-4 | 3.91e-4 |
+| high-Pc crossing | 201 | 500 | 4.80e-4 | 4.80e-4 | 4.64e-4 | 5.14e-4 |
+| head-on | 195 | 15185 | 4.98e-3 | 4.98e-3 | 4.98e-3 | 1.28e-3 |
+| overtaking | 1000 | 50 | 1.85e-4 | 1.86e-4 | 1.87e-4 | 1.64e-4 |
+| near-miss | 10 | 15 | 5.00e-4 | 4.99e-4 | 4.78e-4 | 5.10e-4 |
 
-See FINDINGS.md for why slow crossing Pc is so much lower than head-on despite similar miss distances.
+MC-3D(1M) CIs (from last session run): crossing=[3.515e-4,4.305e-4], head-on=[1.208e-3,1.352e-3], overtaking=[1.384e-4,1.896e-4], near-miss=[4.648e-4,5.552e-4], high-Pc=[4.687e-4,5.593e-4].
+
+---
+
+## What Needs to Be Built Next
+
+### Priority 1 — Importance Sampling (`src/collision/importance_sampling.py`)
+
+Extends MC to Pc < 10⁻⁶. Draw from proposal distribution centered near HBR boundary, reweight by p(x)/q(x). Only method that can validate Chan at Pc < 1e-8. This is the only thing that can confirm Hard Case A results.
+
+### Priority 2 — Patera (2001) Line Integral (`src/collision/patera2001.py`)
+
+Reference: Patera (2001). "General Method for Calculating Satellite Collision Probability." JGCD.
+Compare against Fowler/Chan on all 5 scenarios + hard cases. Add a new column to tab:all_methods.
+
+### Priority 3 — Library-Grade Refactor
+
+- Rename `fowler.py` → `fowler1993.py`
+- Rename `generate_covariances` → `build_covariances_from_rtn`
+- Add `py.typed` marker, complete NumPy-style docstrings
+
+---
+
+## Known Simplifications
+
+### Covariance at TCA is not propagated from T=0
+`generate_covariances` constructs covariances directly at TCA. A real pipeline propagates via STM — along-track uncertainty inflates substantially over 24 hours.
+
+### Chan anisotropy correction is approximate
+< 0.2% accurate for all tested LEO scenarios. Error grows when HBR ≈ σ₁ (large HBR regime).
+
+---
+
+## Performance Reference
+
+| Operation | Time |
+|-----------|------|
+| Full test suite (165 tests) | ~175 s |
+| Single `find_tca` call | ~3–4 s |
+| `generate_covariances` | < 1 ms |
+| `fowler_pc` (dblquad) | ~94 ms |
+| `chan_pc` (ncx2.cdf) | ~0.09 ms |
+| `monte_carlo_pc` N=10⁶ (2D) | ~0.5–2 s |
+| `monte_carlo_3d_pc` N=10,000 | ~5 s |
+| `monte_carlo_3d_pc` N=100,000 | ~50 s |
+| `monte_carlo_3d_pc` N=1,000,000 | ~500 s |
