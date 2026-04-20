@@ -211,3 +211,16 @@ __marimo__/
 
 # Generated plots (PNG outputs — regenerate with scripts in plots/)
 plots/*.png
+
+# macOS
+.DS_Store
+
+# LaTeX auxiliary files
+report/*.synctex.gz
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+
+# Python version pin (local only)
+.python-version
